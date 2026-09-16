@@ -40,6 +40,8 @@ PRODUCT_PRICES = {
     "GitHub Copilot Upgrade Package 1 for advanced use": ("GitHub Copilot Upgrade - Advanced", 100.00),
     "GitHub Copilot Upgrade Package 2 for intensive use": ("GitHub Copilot Upgrade - Intensive", 250.00),
 }
+DEFAULT_PRODUCT_PRICES = dict(PRODUCT_PRICES)
+LICENSE_ACTIVE = {name: True for name in PRODUCT_PRICES}
 
 def export_directory() -> Path:
     """Find the user's Desktop/AI Cost folder, including common OneDrive layouts."""
@@ -66,6 +68,46 @@ def members_file() -> Path:
     folder = export_directory() / "history"
     folder.mkdir(parents=True, exist_ok=True)
     return folder / "costcenter_members.json"
+
+
+def license_settings_file() -> Path:
+    folder = export_directory() / "history"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / "license_settings.json"
+
+
+def load_license_settings():
+    """Load the current licence catalogue without changing old exports/history."""
+    path = license_settings_file()
+    if not path.exists():
+        return
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            settings = json.load(file)
+        for name, values in settings.items():
+            if not isinstance(values, dict):
+                continue
+            price = number(values.get("price"))
+            if price is None:
+                continue
+            product = clean(values.get("product")) or name
+            PRODUCT_PRICES[name] = (product, price)
+            LICENSE_ACTIVE[name] = bool(values.get("active", True))
+    except (OSError, json.JSONDecodeError):
+        return
+
+
+def save_license_settings():
+    settings = {
+        name: {"product": product, "price": price, "active": LICENSE_ACTIVE.get(name, True)}
+        for name, (product, price) in PRODUCT_PRICES.items()
+    }
+    with license_settings_file().open("w", encoding="utf-8") as file:
+        json.dump(settings, file, ensure_ascii=False, indent=2)
+
+
+def active_license_names():
+    return {name for name in PRODUCT_PRICES if LICENSE_ACTIVE.get(name, True)}
 
 
 def load_saved_members():
@@ -162,7 +204,7 @@ def calculate(services, members=None):
     user_licenses = []
 
     for item in services:
-        if item["service"] not in PRODUCT_PRICES:
+        if item["service"] not in active_license_names():
             continue
         product, price = PRODUCT_PRICES[item["service"]]
         accounts = {
@@ -497,7 +539,7 @@ def choose_costcenter(root, members):
 
 
 def choose_licenses(root, services):
-    available = sorted({item["service"] for item in services if item["service"] in PRODUCT_PRICES})
+    available = sorted({item["service"] for item in services if item["service"] in active_license_names()})
     if not available:
         messagebox.showerror("No AI licenses", "No configured AI licenses were found in the report.", parent=root)
         return None
@@ -544,6 +586,102 @@ def ask_for_emails(root):
     return result["emails"]
 
 
+def manage_licenses(root):
+    window = tk.Toplevel(root)
+    window.title("License Settings")
+    window.geometry("700x430")
+    window.transient(root)
+    window.grab_set()
+    ttk.Label(
+        window,
+        text="Add licences, change prices, or deactivate licences for future calculations.",
+    ).pack(anchor="w", padx=16, pady=(16, 8))
+    columns = ("license", "price", "status")
+    table = ttk.Treeview(window, columns=columns, show="headings", height=13)
+    table.heading("license", text="License")
+    table.heading("price", text="Price / user / month (€)")
+    table.heading("status", text="Status")
+    table.column("license", width=390)
+    table.column("price", width=150, anchor="e")
+    table.column("status", width=100, anchor="center")
+    table.pack(fill="both", expand=True, padx=16, pady=4)
+
+    def refresh():
+        for item in table.get_children():
+            table.delete(item)
+        for name in sorted(PRODUCT_PRICES, key=str.casefold):
+            _, price = PRODUCT_PRICES[name]
+            status = "Active" if LICENSE_ACTIVE.get(name, True) else "Inactive"
+            table.insert("", tk.END, iid=name, values=(name, f"€{price:,.2f}", status))
+
+    def selected_name():
+        selected = table.selection()
+        return selected[0] if selected else None
+
+    def add_license():
+        name = simpledialog.askstring("Add license", "License name:", parent=window)
+        if not name:
+            return
+        name = name.strip()
+        if name in PRODUCT_PRICES:
+            messagebox.showerror("License exists", "A license with this name already exists.", parent=window)
+            return
+        price = simpledialog.askfloat("Add license", "Monthly price per user (€):", parent=window, minvalue=0)
+        if price is None:
+            return
+        PRODUCT_PRICES[name] = (name, price)
+        LICENSE_ACTIVE[name] = True
+        save_license_settings()
+        refresh()
+
+    def edit_license():
+        name = selected_name()
+        if not name:
+            messagebox.showinfo("Select license", "Select a license first.", parent=window)
+            return
+        _, old_price = PRODUCT_PRICES[name]
+        price = simpledialog.askfloat(
+            "Change license price",
+            f"Monthly price for {name} (€):",
+            initialvalue=old_price,
+            minvalue=0,
+            parent=window,
+        )
+        if price is None:
+            return
+        product, _ = PRODUCT_PRICES[name]
+        PRODUCT_PRICES[name] = (product, price)
+        save_license_settings()
+        refresh()
+
+    def toggle_license():
+        name = selected_name()
+        if not name:
+            messagebox.showinfo("Select license", "Select a license first.", parent=window)
+            return
+        active = LICENSE_ACTIVE.get(name, True)
+        action = "deactivate" if active else "reactivate"
+        if not messagebox.askyesno(
+            f"{action.title()} license",
+            f"{action.title()} '{name}' for future calculations?\n\n"
+            "Old exports and history will not be changed.",
+            parent=window,
+        ):
+            return
+        LICENSE_ACTIVE[name] = not active
+        save_license_settings()
+        refresh()
+
+    buttons = ttk.Frame(window)
+    buttons.pack(fill="x", padx=16, pady=(6, 14))
+    ttk.Button(buttons, text="Add License", command=add_license).pack(side="left", padx=(0, 6))
+    ttk.Button(buttons, text="Change Price", command=edit_license).pack(side="left", padx=6)
+    ttk.Button(buttons, text="Deactivate / Reactivate", command=toggle_license).pack(side="left", padx=6)
+    ttk.Button(buttons, text="Close", command=window.destroy).pack(side="right")
+    refresh()
+    root.wait_window(window)
+
+
 def add_daily_joke_ticker(parent):
     jokes = [
         "Why did the spreadsheet apply for a job? It wanted to improve its cell-f!",
@@ -574,6 +712,7 @@ def add_daily_joke_ticker(parent):
 
 
 def main():
+    load_license_settings()
     root = tk.Tk()
     root.title("T-Digital AI Cost Calculator")
     root.geometry("560x470")
@@ -914,6 +1053,7 @@ def main():
     data_frame.columnconfigure(1, weight=1)
     ttk.Button(data_frame, text="Update Costcenter Members", style="Telekom.TButton", command=update_members).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
     ttk.Button(data_frame, text="View History", style="Telekom.TButton", command=lambda: show_history(root)).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
+    ttk.Button(data_frame, text="License Settings", style="Telekom.TButton", command=lambda: manage_licenses(root)).grid(row=1, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Button(content, text="Exit", style="Telekom.TButton", command=root.destroy).pack(fill="x", padx=37, pady=(16, 6))
     root.mainloop()
 
