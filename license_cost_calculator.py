@@ -11,6 +11,7 @@ from collections import defaultdict
 from datetime import datetime
 import json
 from pathlib import Path
+import random
 import shutil
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -325,7 +326,7 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
         overview.append([row["product"], row["licenses"], row["unique_users"], row["cost"], row["cost"] * 12])
     style_sheet(overview)
     for row_number in (5, 6, 7):
-        overview.cell(row_number, 2).number_format = '€#,##0.00'
+        overview.cell(row_number, 2).number_format = 'â‚¬#,##0.00'
     for cell in overview[8]:
         cell.fill = PatternFill("solid", fgColor="E20074")
         cell.font = Font(color="FFFFFF", bold=True)
@@ -333,7 +334,7 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     for row in overview.iter_rows(min_row=9, min_col=4, max_col=5):
         for cell in row:
             if isinstance(cell.value, (int, float)):
-                cell.number_format = '€#,##0.00'
+                cell.number_format = 'â‚¬#,##0.00'
 
     detail_sheet = wb.create_sheet("Details")
     detail_sheet.append(
@@ -347,9 +348,9 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     style_sheet(detail_sheet)
     for row in detail_sheet.iter_rows(min_row=2, min_col=5, max_col=6):
         if isinstance(row[0].value, (int, float)):
-            row[0].number_format = '€#,##0.00'
+            row[0].number_format = 'â‚¬#,##0.00'
         if isinstance(row[1].value, (int, float)):
-            row[1].number_format = '€#,##0.00'
+            row[1].number_format = 'â‚¬#,##0.00'
 
     user_cost_sheet = wb.create_sheet("User Costs")
     user_cost_sheet.append([
@@ -363,7 +364,7 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
         ])
     style_sheet(user_cost_sheet)
     for row in user_cost_sheet.iter_rows(min_row=2, min_col=7, max_col=7):
-        row[0].number_format = '€#,##0.00'
+        row[0].number_format = 'â‚¬#,##0.00'
 
     user_cost_sheet.delete_rows(1, user_cost_sheet.max_row)
     user_cost_sheet.append([
@@ -381,7 +382,7 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     for row in user_cost_sheet.iter_rows(min_row=2, min_col=8, max_col=10):
         for cell in row:
             if cell.column in (8, 10) and isinstance(cell.value, (int, float)):
-                cell.number_format = '€#,##0.00'
+                cell.number_format = 'â‚¬#,##0.00'
 
     without_sheet = wb.create_sheet("Users Without AI License")
     without_sheet.append([
@@ -437,7 +438,7 @@ def append_history(source: Path, summary, unique_users, member_updated):
     for row in sheet.iter_rows(min_row=2, min_col=4, max_col=6):
         for cell in row:
             if isinstance(cell.value, (int, float)):
-                cell.number_format = '€#,##0.00'
+                cell.number_format = 'â‚¬#,##0.00'
     for column_cells in sheet.columns:
         width = min(max(len(clean(c.value)) for c in column_cells) + 2, 45)
         sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = width
@@ -458,7 +459,7 @@ def append_history(source: Path, summary, unique_users, member_updated):
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="E20074")
     for row in product_sheet.iter_rows(min_row=2, min_col=4, max_col=4):
-        row[0].number_format = '€#,##0.00'
+        row[0].number_format = 'â‚¬#,##0.00'
     for column_cells in product_sheet.columns:
         width = min(max(len(clean(c.value)) for c in column_cells) + 2, 42)
         product_sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = width
@@ -599,7 +600,7 @@ def manage_licenses(root):
     columns = ("license", "price", "status")
     table = ttk.Treeview(window, columns=columns, show="headings", height=13)
     table.heading("license", text="License")
-    table.heading("price", text="Price / user / month (€)")
+    table.heading("price", text="Price / user / month (â‚¬)")
     table.heading("status", text="Status")
     table.column("license", width=390)
     table.column("price", width=150, anchor="e")
@@ -612,7 +613,7 @@ def manage_licenses(root):
         for name in sorted(PRODUCT_PRICES, key=str.casefold):
             _, price = PRODUCT_PRICES[name]
             status = "Active" if LICENSE_ACTIVE.get(name, True) else "Inactive"
-            table.insert("", tk.END, iid=name, values=(name, f"€{price:,.2f}", status))
+            table.insert("", tk.END, iid=name, values=(name, f"â‚¬{price:,.2f}", status))
 
     def selected_name():
         selected = table.selection()
@@ -626,7 +627,7 @@ def manage_licenses(root):
         if name in PRODUCT_PRICES:
             messagebox.showerror("License exists", "A license with this name already exists.", parent=window)
             return
-        price = simpledialog.askfloat("Add license", "Monthly price per user (€):", parent=window, minvalue=0)
+        price = simpledialog.askfloat("Add license", "Monthly price per user (â‚¬):", parent=window, minvalue=0)
         if price is None:
             return
         PRODUCT_PRICES[name] = (name, price)
@@ -642,7 +643,7 @@ def manage_licenses(root):
         _, old_price = PRODUCT_PRICES[name]
         price = simpledialog.askfloat(
             "Change license price",
-            f"Monthly price for {name} (€):",
+            f"Monthly price for {name} (â‚¬):",
             initialvalue=old_price,
             minvalue=0,
             parent=window,
@@ -683,23 +684,88 @@ def manage_licenses(root):
 
 
 def add_daily_joke_ticker(parent):
-    jokes = [
-        "Why did the spreadsheet apply for a job? It wanted to improve its cell-f!",
-        "I told my manager I needed a raise because three companies were after me: gas, electricity, and internet.",
-        "Why was the AI assistant calm? It had excellent processing under pressure.",
-        "Our team meeting was productive: we decided to schedule another meeting.",
-        "Why did the report go to therapy? It had too many unresolved issues.",
-        "A good dashboard is like a good coffee: clear, useful, and not overloaded.",
-        "Why did the analyst bring a ladder? To reach the next level of insights.",
+    setups = [
+        "Why did the spreadsheet apply for a job?",
+        "Why was the dashboard invited to the meeting?",
+        "Why did the analyst bring a ladder to work?",
+        "Why did the report go to therapy?",
+        "Why did the database take a coffee break?",
+        "Why did the formula get promoted?",
+        "Why did the pivot table feel confident?",
+        "Why did the project plan stay calm?",
+        "Why did the keyboard join the team?",
+        "Why did the chart get applause?",
+        "Why did the data scientist bring an umbrella?",
+        "Why did the server go to the gym?",
+        "Why did the calendar become a manager?",
+        "Why did the analyst check the numbers twice?",
+        "Why did the laptop ask for a holiday?",
+        "Why did the meeting room need a map?",
+        "Why did the spreadsheet wear a tie?",
+        "Why did the cloud get a compliment?",
+        "Why did the query cross the office?",
+        "Why did the robot bring a notebook?",
+        "Why did the team invite the calculator?",
+        "Why did the chart avoid gossip?",
+        "Why did the data pipeline take the stairs?",
+        "Why did the inbox start exercising?",
+        "Why did the analyst bring a ruler?",
+        "Why did the report arrive early?",
+        "Why did the meeting agenda smile?",
+        "Why did the spreadsheet open a savings account?",
+        "Why did the code review bring snacks?",
+        "Why did the dashboard wear sunglasses?",
+        "Why did the metric get a certificate?",
+        "Why did the file name stay short?",
+        "Why did the server bring a jacket?",
+        "Why did the team use a bookmark?",
+        "Why did the chart bring a microphone?",
+        "Why did the formula take notes?",
+        "Why did the laptop join the coffee queue?",
+        "Why did the database tell a story?",
+        "Why did the analyst bring a compass?",
+        "Why did the project plan bring a stopwatch?",
+        "Why did the spreadsheet get a thank-you note?",
+        "Why did the query ask for directions?",
+        "Why did the calendar book a meeting with itself?",
+        "Why did the report carry an umbrella?",
+        "Why did the dashboard bring a ruler?",
+        "Why did the team give the server a high five?",
+        "Why did the code bring a lunchbox?",
+        "Why did the number wear a badge?",
+        "Why did the chart bring a telescope?",
+        "Why did the AI assistant stay relaxed?",
     ]
-    joke = jokes[datetime.now().timetuple().tm_yday % len(jokes)]
+    punchlines = [
+        "It wanted to improve its cell-f.",
+        "It was looking for better data and fewer dramas.",
+        "Because every good answer starts with a solid calculation.",
+        "It had excellent processing under pressure.",
+        "It knew the best solution was just one refresh away.",
+        "It wanted to reach the next level of insights.",
+        "It believed teamwork makes the workflow work.",
+        "It preferred clear outputs and short meetings.",
+        "It was ready to turn a problem into a useful report.",
+        "It knew that even small improvements add up.",
+    ]
+    jokes = [f"{setup} {punchline}" for setup in setups for punchline in punchlines]
+    random.SystemRandom().shuffle(jokes)
+    joke_index = 0
     ticker = tk.Frame(parent, background="#ffffff", height=32)
     ticker.pack(fill="x", padx=34, pady=(0, 10))
     ticker.pack_propagate(False)
     canvas = tk.Canvas(ticker, background="#ffffff", highlightthickness=0, height=32)
     canvas.pack(fill="both", expand=True)
     canvas.create_text(10, 16, text="DAILY NOTE", fill="#e20074", anchor="w", font=("Arial", 9, "bold"))
-    text_id = canvas.create_text(105, 16, text=joke, fill="#555555", anchor="w", font=("Arial", 10))
+    text_id = canvas.create_text(105, 16, text=jokes[joke_index], fill="#555555", anchor="w", font=("Arial", 10))
+
+    def new_joke():
+        nonlocal joke_index
+        joke_index = (joke_index + 1) % len(jokes)
+        canvas.itemconfigure(text_id, text=jokes[joke_index])
+        canvas.coords(text_id, 105, 16)
+
+    ttk.Button(parent, text="New joke", command=new_joke).pack(anchor="e", padx=34, pady=(0, 8))
 
     def scroll():
         canvas.move(text_id, -1, 0)
@@ -711,7 +777,6 @@ def add_daily_joke_ticker(parent):
     canvas.after(300, scroll)
 
 
-
 def show_startup_splash(root):
     """Show a short T-Digital splash screen only while the app starts."""
     root.withdraw()
@@ -720,12 +785,32 @@ def show_startup_splash(root):
     splash.configure(background="#e20074")
     splash.geometry("420x220")
     splash.update_idletasks()
-    x = (splash.winfo_screenwidth() - splash.winfo_width()) // 2
-    y = (splash.winfo_screenheight() - splash.winfo_height()) // 2
+    screen_width = splash.winfo_screenwidth()
+    screen_height = splash.winfo_screenheight()
+    x = (screen_width - splash.winfo_width()) // 2
+    y = (screen_height - splash.winfo_height()) // 2
     splash.geometry(f"+{x}+{y}")
-    tk.Label(splash, text="T", background="#e20074", foreground="white", font=("Arial", 54, "bold")).pack(pady=(24, 0))
-    tk.Label(splash, text="T-Digital AI Cost Calculator", background="#e20074", foreground="white", font=("Arial", 17, "bold")).pack(pady=(4, 0))
-    tk.Label(splash, text="License cost management", background="#e20074", foreground="white", font=("Arial", 10)).pack(pady=(5, 0))
+    tk.Label(
+        splash,
+        text="T",
+        background="#e20074",
+        foreground="white",
+        font=("Arial", 54, "bold"),
+    ).pack(pady=(24, 0))
+    tk.Label(
+        splash,
+        text="T-Digital AI Cost Calculator",
+        background="#e20074",
+        foreground="white",
+        font=("Arial", 17, "bold"),
+    ).pack(pady=(4, 0))
+    tk.Label(
+        splash,
+        text="License cost management",
+        background="#e20074",
+        foreground="white",
+        font=("Arial", 10),
+    ).pack(pady=(5, 0))
 
     def finish():
         if splash.winfo_exists():
@@ -734,6 +819,7 @@ def show_startup_splash(root):
         root.lift()
 
     splash.after(1500, finish)
+
 
 def main():
     load_license_settings()
@@ -836,9 +922,9 @@ def main():
                     "Export complete",
                     f"Saved to:\n{destination_name}\n\n"
                     f"Unique AI users: {len(unique_users)}\n"
-                    f"Monthly cost: €{total_cost:,.2f}\n"
-                    f"12-month projection: €{total_cost * 12:,.2f}\n"
-                    f"Average/user: €{average:,.2f}",
+                    f"Monthly cost: â‚¬{total_cost:,.2f}\n"
+                    f"12-month projection: â‚¬{total_cost * 12:,.2f}\n"
+                    f"Average/user: â‚¬{average:,.2f}",
                     parent=root,
                 )
         except Exception as exc:
@@ -893,7 +979,7 @@ def main():
                     "Cost center export complete",
                     f"Cost center: {costcenter}\n"
                     f"Unique AI users: {len(unique_users)}\n"
-                    f"Monthly cost: €{sum(row['cost'] or 0 for row in summary):,.2f}\n"
+                    f"Monthly cost: â‚¬{sum(row['cost'] or 0 for row in summary):,.2f}\n"
                     f"Saved to:\n{destination_name}",
                     parent=root,
                 )
@@ -1083,5 +1169,33 @@ def main():
     root.mainloop()
 
 
+
+
+def add_daily_joke_ticker(parent):
+    topics = ["spreadsheet", "dashboard", "analyst", "report", "database", "formula", "pivot table", "project plan", "keyboard", "chart", "server", "calendar", "laptop", "query", "robot", "calculator", "data pipeline", "inbox", "metric", "bookmark", "team", "number", "AI assistant", "agenda", "cost center", "license report", "user account", "manager", "export", "history log", "Excel file", "GitHub workflow", "Windows build", "Mac app", "budget", "invoice", "email", "network", "folder", "button", "scrollbar", "calculator UI", "meeting room", "cloud", "code review", "file name", "coffee queue", "calendar invite", "password"]
+    endings = ["wanted better data and fewer dramas.", "was looking for the next level of insights.", "knew every good answer starts with a solid calculation.", "had excellent processing under pressure.", "thought one more refresh would solve everything.", "believed teamwork makes the workflow work.", "preferred clear outputs and short meetings.", "was ready to turn a problem into a useful report.", "knew even small improvements add up.", "wanted to keep the budget in a happy place."]
+    jokes = [f"Why did the {topic} join the meeting? It {ending}" for topic in topics for ending in endings]
+    __import__("random").SystemRandom().shuffle(jokes)
+    joke_index = 0
+    ticker = tk.Frame(parent, background="#ffffff", height=32)
+    ticker.pack(fill="x", padx=34, pady=(0, 10))
+    ticker.pack_propagate(False)
+    canvas = tk.Canvas(ticker, background="#ffffff", highlightthickness=0, height=32)
+    canvas.pack(fill="both", expand=True)
+    canvas.create_text(10, 16, text="DAILY NOTE", fill="#e20074", anchor="w", font=("Arial", 9, "bold"))
+    text_id = canvas.create_text(105, 16, text=jokes[joke_index], fill="#555555", anchor="w", font=("Arial", 10))
+    def new_joke():
+        nonlocal joke_index
+        joke_index = (joke_index + 1) % len(jokes)
+        canvas.itemconfigure(text_id, text=jokes[joke_index])
+        canvas.coords(text_id, 105, 16)
+    ttk.Button(parent, text="New joke", command=new_joke).pack(anchor="e", padx=34, pady=(0, 8))
+    def scroll():
+        canvas.move(text_id, -1, 0)
+        bounds = canvas.bbox(text_id)
+        if bounds and bounds[2] < 0:
+            canvas.move(text_id, canvas.winfo_width() - bounds[0] + 20, 0)
+        canvas.after(35, scroll)
+    canvas.after(300, scroll)
 if __name__ == "__main__":
     main()
