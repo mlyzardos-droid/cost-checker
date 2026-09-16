@@ -711,6 +711,30 @@ def add_daily_joke_ticker(parent):
     canvas.after(300, scroll)
 
 
+
+def show_startup_splash(root):
+    """Show a short T-Digital splash screen only while the app starts."""
+    root.withdraw()
+    splash = tk.Toplevel(root)
+    splash.overrideredirect(True)
+    splash.configure(background="#e20074")
+    splash.geometry("420x220")
+    splash.update_idletasks()
+    x = (splash.winfo_screenwidth() - splash.winfo_width()) // 2
+    y = (splash.winfo_screenheight() - splash.winfo_height()) // 2
+    splash.geometry(f"+{x}+{y}")
+    tk.Label(splash, text="T", background="#e20074", foreground="white", font=("Arial", 54, "bold")).pack(pady=(24, 0))
+    tk.Label(splash, text="T-Digital AI Cost Calculator", background="#e20074", foreground="white", font=("Arial", 17, "bold")).pack(pady=(4, 0))
+    tk.Label(splash, text="License cost management", background="#e20074", foreground="white", font=("Arial", 10)).pack(pady=(5, 0))
+
+    def finish():
+        if splash.winfo_exists():
+            splash.destroy()
+        root.deiconify()
+        root.lift()
+
+    splash.after(1500, finish)
+
 def main():
     load_license_settings()
     root = tk.Tk()
@@ -719,6 +743,7 @@ def main():
     root.minsize(520, 430)
     root.resizable(True, True)
     root.configure(background="#f3f3f3")
+    show_startup_splash(root)
     style = ttk.Style(root)
     style.configure("Telekom.TButton", font=("Arial", 11), padding=(12, 8))
     style.configure("Telekom.TLabel", background="#f3f3f3", foreground="#333333")
