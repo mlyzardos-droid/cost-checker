@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import random
 import shutil
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -850,12 +851,34 @@ def show_startup_splash(root):
     splash.after(1500, finish)
 
 
+def configure_windows_dpi():
+    """Let Windows provide logical pixels so the UI is correct at any DPI."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        # Per-monitor v2 gives the best result on Windows 10/11 and falls back
+        # to the older API for systems that do not expose the newer call.
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except (AttributeError, OSError):
+            pass
+
+
 def main():
     load_license_settings()
+    configure_windows_dpi()
     root = tk.Tk()
     root.title("T-Digital AI Cost Calculator")
-    root.geometry("560x470")
-    root.minsize(520, 430)
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    initial_width = min(max(int(screen_width * 0.38), 560), 760)
+    initial_height = min(max(int(screen_height * 0.72), 620), 900)
+    root.geometry(f"{initial_width}x{initial_height}")
+    root.minsize(min(560, max(420, screen_width - 80)), min(620, max(460, screen_height - 100)))
     root.resizable(True, True)
     root.configure(background="#f3f3f3")
     show_startup_splash(root)
