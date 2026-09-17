@@ -326,7 +326,7 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
         overview.append([row["product"], row["licenses"], row["unique_users"], row["cost"], row["cost"] * 12])
     style_sheet(overview)
     for row_number in (5, 6, 7):
-        overview.cell(row_number, 2).number_format = 'â‚¬#,##0.00'
+        overview.cell(row_number, 2).number_format = '€#,##0.00'
     for cell in overview[8]:
         cell.fill = PatternFill("solid", fgColor="E20074")
         cell.font = Font(color="FFFFFF", bold=True)
@@ -334,7 +334,7 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     for row in overview.iter_rows(min_row=9, min_col=4, max_col=5):
         for cell in row:
             if isinstance(cell.value, (int, float)):
-                cell.number_format = 'â‚¬#,##0.00'
+                cell.number_format = '€#,##0.00'
 
     detail_sheet = wb.create_sheet("Details")
     detail_sheet.append(
@@ -348,9 +348,9 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     style_sheet(detail_sheet)
     for row in detail_sheet.iter_rows(min_row=2, min_col=5, max_col=6):
         if isinstance(row[0].value, (int, float)):
-            row[0].number_format = 'â‚¬#,##0.00'
+            row[0].number_format = '€#,##0.00'
         if isinstance(row[1].value, (int, float)):
-            row[1].number_format = 'â‚¬#,##0.00'
+            row[1].number_format = '€#,##0.00'
 
     user_cost_sheet = wb.create_sheet("User Costs")
     user_cost_sheet.append([
@@ -364,7 +364,7 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
         ])
     style_sheet(user_cost_sheet)
     for row in user_cost_sheet.iter_rows(min_row=2, min_col=7, max_col=7):
-        row[0].number_format = 'â‚¬#,##0.00'
+        row[0].number_format = '€#,##0.00'
 
     user_cost_sheet.delete_rows(1, user_cost_sheet.max_row)
     user_cost_sheet.append([
@@ -382,7 +382,7 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     for row in user_cost_sheet.iter_rows(min_row=2, min_col=8, max_col=10):
         for cell in row:
             if cell.column in (8, 10) and isinstance(cell.value, (int, float)):
-                cell.number_format = 'â‚¬#,##0.00'
+                cell.number_format = '€#,##0.00'
 
     without_sheet = wb.create_sheet("Users Without AI License")
     without_sheet.append([
@@ -438,7 +438,7 @@ def append_history(source: Path, summary, unique_users, member_updated):
     for row in sheet.iter_rows(min_row=2, min_col=4, max_col=6):
         for cell in row:
             if isinstance(cell.value, (int, float)):
-                cell.number_format = 'â‚¬#,##0.00'
+                cell.number_format = '€#,##0.00'
     for column_cells in sheet.columns:
         width = min(max(len(clean(c.value)) for c in column_cells) + 2, 45)
         sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = width
@@ -459,7 +459,7 @@ def append_history(source: Path, summary, unique_users, member_updated):
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="E20074")
     for row in product_sheet.iter_rows(min_row=2, min_col=4, max_col=4):
-        row[0].number_format = 'â‚¬#,##0.00'
+        row[0].number_format = '€#,##0.00'
     for column_cells in product_sheet.columns:
         width = min(max(len(clean(c.value)) for c in column_cells) + 2, 42)
         product_sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = width
@@ -539,6 +539,35 @@ def choose_costcenter(root, members):
     return result["value"]
 
 
+def choose_manager(root, members):
+    managers = sorted({m.get("manager", "") for m in members.values() if m.get("manager")}, key=str.casefold)
+    if not managers:
+        messagebox.showerror(
+            "No managers",
+            "No cost center managers were found in the saved member report.",
+            parent=root,
+        )
+        return None
+    window = tk.Toplevel(root)
+    window.title("Select Cost Center Manager")
+    window.geometry("520x150")
+    window.transient(root)
+    window.grab_set()
+    selected = tk.StringVar(value=managers[0])
+    ttk.Label(window, text="Cost center manager:").pack(pady=(20, 6))
+    combo = ttk.Combobox(window, textvariable=selected, values=managers, state="readonly", width=45)
+    combo.pack()
+    result = {"value": None}
+
+    def confirm():
+        result["value"] = selected.get()
+        window.destroy()
+
+    ttk.Button(window, text="Continue", command=confirm).pack(pady=14)
+    root.wait_window(window)
+    return result["value"]
+
+
 def choose_licenses(root, services):
     available = sorted({item["service"] for item in services if item["service"] in active_license_names()})
     if not available:
@@ -600,7 +629,7 @@ def manage_licenses(root):
     columns = ("license", "price", "status")
     table = ttk.Treeview(window, columns=columns, show="headings", height=13)
     table.heading("license", text="License")
-    table.heading("price", text="Price / user / month (â‚¬)")
+    table.heading("price", text="Price / user / month (€)")
     table.heading("status", text="Status")
     table.column("license", width=390)
     table.column("price", width=150, anchor="e")
@@ -613,7 +642,7 @@ def manage_licenses(root):
         for name in sorted(PRODUCT_PRICES, key=str.casefold):
             _, price = PRODUCT_PRICES[name]
             status = "Active" if LICENSE_ACTIVE.get(name, True) else "Inactive"
-            table.insert("", tk.END, iid=name, values=(name, f"â‚¬{price:,.2f}", status))
+            table.insert("", tk.END, iid=name, values=(name, f"€{price:,.2f}", status))
 
     def selected_name():
         selected = table.selection()
@@ -627,7 +656,7 @@ def manage_licenses(root):
         if name in PRODUCT_PRICES:
             messagebox.showerror("License exists", "A license with this name already exists.", parent=window)
             return
-        price = simpledialog.askfloat("Add license", "Monthly price per user (â‚¬):", parent=window, minvalue=0)
+        price = simpledialog.askfloat("Add license", "Monthly price per user (€):", parent=window, minvalue=0)
         if price is None:
             return
         PRODUCT_PRICES[name] = (name, price)
@@ -643,7 +672,7 @@ def manage_licenses(root):
         _, old_price = PRODUCT_PRICES[name]
         price = simpledialog.askfloat(
             "Change license price",
-            f"Monthly price for {name} (â‚¬):",
+            f"Monthly price for {name} (€):",
             initialvalue=old_price,
             minvalue=0,
             parent=window,
@@ -858,6 +887,9 @@ def main():
     current_members, member_updated = load_saved_members()
     status_var = tk.StringVar(value=f"Costcenter data: {member_updated}")
     ttk.Label(content, textvariable=status_var, foreground="#555555").pack(pady=(0, 12))
+    current_source = None
+    source_status_var = tk.StringVar(value="AD report: Not selected")
+    ttk.Label(content, textvariable=source_status_var, foreground="#555555").pack(pady=(0, 12))
 
     def update_members():
         nonlocal current_members, member_updated
@@ -883,15 +915,28 @@ def main():
             messagebox.showerror("Could not update Costcenter data", str(exc), parent=root)
             return False
 
-    def run_calculator():
+    def select_source_report():
+        nonlocal current_source
         source_name = filedialog.askopenfilename(
             parent=root,
             title="Select AD Based License Report",
             filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")],
         )
         if not source_name:
+            return None
+        current_source = Path(source_name)
+        source_status_var.set(f"AD report: {current_source.name}")
+        return current_source
+
+    def get_source_report():
+        if current_source and current_source.exists():
+            return current_source
+        return select_source_report()
+
+    def run_calculator():
+        source = get_source_report()
+        if not source:
             return
-        source = Path(source_name)
         try:
             if not current_members and not update_members():
                 return
@@ -922,9 +967,9 @@ def main():
                     "Export complete",
                     f"Saved to:\n{destination_name}\n\n"
                     f"Unique AI users: {len(unique_users)}\n"
-                    f"Monthly cost: â‚¬{total_cost:,.2f}\n"
-                    f"12-month projection: â‚¬{total_cost * 12:,.2f}\n"
-                    f"Average/user: â‚¬{average:,.2f}",
+                    f"Monthly cost: €{total_cost:,.2f}\n"
+                    f"12-month projection: €{total_cost * 12:,.2f}\n"
+                    f"Average/user: €{average:,.2f}",
                     parent=root,
                 )
         except Exception as exc:
@@ -934,18 +979,14 @@ def main():
         nonlocal current_members, member_updated
         if not current_members and not update_members():
             return
-        source_name = filedialog.askopenfilename(
-            parent=root,
-            title="Select AD Based License Report",
-            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")],
-        )
-        if not source_name:
+        source = get_source_report()
+        if not source:
             return
         costcenter = choose_costcenter(root, current_members)
         if not costcenter:
             return
         try:
-            services = read_report(Path(source_name))
+            services = read_report(source)
             selected_members = {
                 key: value for key, value in current_members.items()
                 if value.get("costcenter") == costcenter
@@ -974,17 +1015,76 @@ def main():
                 filetypes=[("Excel files", "*.xlsx")],
             )
             if destination_name:
-                export_report(Path(destination_name), Path(source_name), summary, detail, unique_users, user_costs, without_license, user_licenses)
+                export_report(Path(destination_name), source, summary, detail, unique_users, user_costs, without_license, user_licenses)
                 messagebox.showinfo(
                     "Cost center export complete",
                     f"Cost center: {costcenter}\n"
                     f"Unique AI users: {len(unique_users)}\n"
-                    f"Monthly cost: â‚¬{sum(row['cost'] or 0 for row in summary):,.2f}\n"
+                    f"Monthly cost: €{sum(row['cost'] or 0 for row in summary):,.2f}\n"
                     f"Saved to:\n{destination_name}",
                     parent=root,
                 )
         except Exception as exc:
             messagebox.showerror("Could not export cost center", str(exc), parent=root)
+
+    def run_manager_export():
+        nonlocal current_members, member_updated
+        if not current_members and not update_members():
+            return
+        source = get_source_report()
+        if not source:
+            return
+        manager = choose_manager(root, current_members)
+        if not manager:
+            return
+        try:
+            services = read_report(source)
+            selected_members = {
+                key: value for key, value in current_members.items()
+                if value.get("manager") == manager
+            }
+            selected_accounts = set(selected_members)
+            selected_services = []
+            for item in services:
+                users = [
+                    u for u in item["users"]
+                    if (u["account"] or u["username"]).casefold() in selected_accounts
+                ]
+                if users:
+                    selected_item = dict(item)
+                    selected_item["users"] = users
+                    selected_item["reported_total"] = len(users)
+                    selected_services.append(selected_item)
+            summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
+                selected_services, selected_members
+            )
+            if not detail:
+                raise ValueError(f"No AI licences found for manager {manager}.")
+            safe_manager = "_".join(manager.split())[:60]
+            default_name = f"AI_License_Cost_Manager_{safe_manager}_{datetime.now():%Y%m%d_%H%M}.xlsx"
+            destination_name = filedialog.asksaveasfilename(
+                parent=root,
+                title="Save manager export",
+                initialdir=str(export_directory()),
+                initialfile=default_name,
+                defaultextension=".xlsx",
+                filetypes=[("Excel files", "*.xlsx")],
+            )
+            if destination_name:
+                export_report(
+                    Path(destination_name), source, summary, detail,
+                    unique_users, user_costs, without_license, user_licenses,
+                )
+                messagebox.showinfo(
+                    "Manager export complete",
+                    f"Manager: {manager}\n"
+                    f"Unique AI users: {len(unique_users)}\n"
+                    f"Monthly cost: €{sum(row['cost'] or 0 for row in summary):,.2f}\n"
+                    f"Saved to:\n{destination_name}",
+                    parent=root,
+                )
+        except Exception as exc:
+            messagebox.showerror("Could not export manager", str(exc), parent=root)
 
     def run_email_export():
         nonlocal current_members, member_updated
@@ -993,12 +1093,8 @@ def main():
         requested_emails = ask_for_emails(root)
         if not requested_emails:
             return
-        source_name = filedialog.askopenfilename(
-            parent=root,
-            title="Select AD Based License Report",
-            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")],
-        )
-        if not source_name:
+        source = get_source_report()
+        if not source:
             return
         try:
             email_to_account = {
@@ -1009,7 +1105,7 @@ def main():
             selected_accounts = {email_to_account[email] for email in requested_emails if email in email_to_account}
             missing_emails = [email for email in requested_emails if email not in email_to_account]
             selected_members = {key: current_members[key] for key in selected_accounts}
-            services = read_report(Path(source_name))
+            services = read_report(source)
             selected_services = []
             for item in services:
                 users = [u for u in item["users"] if (u["account"] or u["username"]).casefold() in selected_accounts]
@@ -1032,7 +1128,7 @@ def main():
             )
             if destination_name:
                 export_report(
-                    Path(destination_name), Path(source_name), summary, detail,
+                    Path(destination_name), source, summary, detail,
                     unique_users, user_costs, without_license, user_licenses,
                     missing_emails,
                 )
@@ -1052,15 +1148,10 @@ def main():
         nonlocal current_members, member_updated
         if not current_members and not update_members():
             return
-        source_name = filedialog.askopenfilename(
-            parent=root,
-            title="Select AD Based License Report",
-            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")],
-        )
-        if not source_name:
+        source = get_source_report()
+        if not source:
             return
         try:
-            source = Path(source_name)
             services = read_report(source)
             _, _, _, all_user_costs, _, _ = calculate(services, current_members)
             selected_accounts = {
@@ -1108,15 +1199,11 @@ def main():
         nonlocal current_members, member_updated
         if not current_members and not update_members():
             return
-        source_name = filedialog.askopenfilename(
-            parent=root,
-            title="Select AD Based License Report",
-            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")],
-        )
-        if not source_name:
+        source = get_source_report()
+        if not source:
             return
         try:
-            services = read_report(Path(source_name))
+            services = read_report(source)
             selected_names = choose_licenses(root, services)
             if not selected_names:
                 return
@@ -1134,7 +1221,7 @@ def main():
             )
             if destination_name:
                 export_report(
-                    Path(destination_name), Path(source_name), summary, detail,
+                    Path(destination_name), source, summary, detail,
                     unique_users, user_costs, without_license, user_licenses,
                 )
                 messagebox.showinfo(
@@ -1155,47 +1242,21 @@ def main():
     ttk.Button(exports, text="Calculate from Excel report", style="Telekom.TButton", command=run_calculator).grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Button(exports, text="Export Cost Center", style="Telekom.TButton", command=run_costcenter_export).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
     ttk.Button(exports, text="Export by User Emails", style="Telekom.TButton", command=run_email_export).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export by Licenses", style="Telekom.TButton", command=run_license_export).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export Users with Multiple Chargeable Licenses", style="Telekom.TButton", command=run_multiple_license_export).grid(row=3, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export by Cost Center Manager", style="Telekom.TButton", command=run_manager_export).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export by Licenses", style="Telekom.TButton", command=run_license_export).grid(row=3, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export Users with Multiple Chargeable Licenses", style="Telekom.TButton", command=run_multiple_license_export).grid(row=4, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Label(content, text="DATA & HISTORY", style="Telekom.TLabel", font=("Arial", 10, "bold")).pack(anchor="w", padx=34, pady=(12, 2))
     data_frame = ttk.Frame(content)
     data_frame.pack(fill="x", padx=34)
     data_frame.columnconfigure(0, weight=1)
     data_frame.columnconfigure(1, weight=1)
-    ttk.Button(data_frame, text="Update Costcenter Members", style="Telekom.TButton", command=update_members).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
-    ttk.Button(data_frame, text="View History", style="Telekom.TButton", command=lambda: show_history(root)).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
-    ttk.Button(data_frame, text="License Settings", style="Telekom.TButton", command=lambda: manage_licenses(root)).grid(row=1, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(data_frame, text="Select / Change AD Report", style="Telekom.TButton", command=select_source_report).grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(data_frame, text="Update Costcenter Members", style="Telekom.TButton", command=update_members).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
+    ttk.Button(data_frame, text="View History", style="Telekom.TButton", command=lambda: show_history(root)).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
+    ttk.Button(data_frame, text="License Settings", style="Telekom.TButton", command=lambda: manage_licenses(root)).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Button(content, text="Exit", style="Telekom.TButton", command=root.destroy).pack(fill="x", padx=37, pady=(16, 6))
     root.mainloop()
 
 
-
-
-def add_daily_joke_ticker(parent):
-    topics = ["spreadsheet", "dashboard", "analyst", "report", "database", "formula", "pivot table", "project plan", "keyboard", "chart", "server", "calendar", "laptop", "query", "robot", "calculator", "data pipeline", "inbox", "metric", "bookmark", "team", "number", "AI assistant", "agenda", "cost center", "license report", "user account", "manager", "export", "history log", "Excel file", "GitHub workflow", "Windows build", "Mac app", "budget", "invoice", "email", "network", "folder", "button", "scrollbar", "calculator UI", "meeting room", "cloud", "code review", "file name", "coffee queue", "calendar invite", "password"]
-    endings = ["wanted better data and fewer dramas.", "was looking for the next level of insights.", "knew every good answer starts with a solid calculation.", "had excellent processing under pressure.", "thought one more refresh would solve everything.", "believed teamwork makes the workflow work.", "preferred clear outputs and short meetings.", "was ready to turn a problem into a useful report.", "knew even small improvements add up.", "wanted to keep the budget in a happy place."]
-    jokes = [f"Why did the {topic} join the meeting? It {ending}" for topic in topics for ending in endings]
-    __import__("random").SystemRandom().shuffle(jokes)
-    joke_index = 0
-    ticker = tk.Frame(parent, background="#ffffff", height=32)
-    ticker.pack(fill="x", padx=34, pady=(0, 10))
-    ticker.pack_propagate(False)
-    canvas = tk.Canvas(ticker, background="#ffffff", highlightthickness=0, height=32)
-    canvas.pack(fill="both", expand=True)
-    canvas.create_text(10, 16, text="DAILY NOTE", fill="#e20074", anchor="w", font=("Arial", 9, "bold"))
-    text_id = canvas.create_text(105, 16, text=jokes[joke_index], fill="#555555", anchor="w", font=("Arial", 10))
-    def new_joke():
-        nonlocal joke_index
-        joke_index = (joke_index + 1) % len(jokes)
-        canvas.itemconfigure(text_id, text=jokes[joke_index])
-        canvas.coords(text_id, 105, 16)
-    ttk.Button(parent, text="New joke", command=new_joke).pack(anchor="e", padx=34, pady=(0, 8))
-    def scroll():
-        canvas.move(text_id, -1, 0)
-        bounds = canvas.bbox(text_id)
-        if bounds and bounds[2] < 0:
-            canvas.move(text_id, canvas.winfo_width() - bounds[0] + 20, 0)
-        canvas.after(35, scroll)
-    canvas.after(300, scroll)
 if __name__ == "__main__":
     main()
