@@ -858,8 +858,6 @@ def configure_windows_dpi():
     try:
         import ctypes
 
-        # Per-monitor v2 gives the best result on Windows 10/11 and falls back
-        # to the older API for systems that do not expose the newer call.
         ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     except (AttributeError, OSError):
         try:
@@ -913,6 +911,37 @@ def main():
     current_source = None
     source_status_var = tk.StringVar(value="AD report: Not selected")
     ttk.Label(content, textvariable=source_status_var, foreground="#555555").pack(pady=(0, 12))
+    preview_vars = {
+        "users": tk.StringVar(value="—"),
+        "monthly": tk.StringVar(value="—"),
+        "average": tk.StringVar(value="—"),
+        "projection": tk.StringVar(value="—"),
+        "without": tk.StringVar(value="—"),
+    }
+    preview = ttk.LabelFrame(content, text="Live Preview", padding=10)
+    preview.pack(fill="x", padx=34, pady=(0, 14))
+    preview_columns = [
+        ("users", "Unique AI users"),
+        ("monthly", "Monthly cost"),
+        ("average", "Cost / user"),
+        ("projection", "12-month projection"),
+        ("without", "Users without license"),
+    ]
+    for column, (key, label) in enumerate(preview_columns):
+        card = ttk.Frame(preview)
+        card.grid(row=0, column=column, sticky="nsew", padx=4)
+        preview.columnconfigure(column, weight=1)
+        ttk.Label(card, text=label, style="Telekom.TLabel", wraplength=120, justify="center").pack()
+        ttk.Label(card, textvariable=preview_vars[key], font=("Arial", 13, "bold"), foreground="#e20074").pack(pady=(4, 0))
+
+    def update_preview(summary, unique_users, without_license):
+        total_cost = sum(row["cost"] or 0 for row in summary)
+        user_count = len(unique_users)
+        preview_vars["users"].set(f"{user_count:,}")
+        preview_vars["monthly"].set(f"€{total_cost:,.2f}")
+        preview_vars["average"].set(f"€{total_cost / user_count:,.2f}" if user_count else "n.a.")
+        preview_vars["projection"].set(f"€{total_cost * 12:,.2f}")
+        preview_vars["without"].set(f"{len(without_license):,}")
 
     def update_members():
         nonlocal current_members, member_updated
@@ -967,6 +996,7 @@ def main():
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(services, current_members)
             if not detail:
                 raise ValueError("No matching AI services were found.")
+            update_preview(summary, unique_users, without_license)
             default_name = f"AI_License_Cost_Summary_{datetime.now():%Y%m%d_%H%M}.xlsx"
             destination_dir = export_directory()
             destination_name = filedialog.asksaveasfilename(
