@@ -502,61 +502,6 @@ def append_history(source: Path, period, summary, unique_users, user_costs, memb
         len(unique_users),
         total_cost,
         total_cost * 12,
-        total_cost / len(unique_users) if unique_users else 0,
-        member_updated,
-    ])
-    style_sheet(sheet)
-    for row in sheet.iter_rows(min_row=2, min_col=5, max_col=7):
-        for cell in row:
-            cell.number_format = '€#,##0.00'
-
-    product_sheet = wb["Product History"] if "Product History" in wb.sheetnames else wb.create_sheet("Product History")
-    if product_sheet.max_row == 1 and product_sheet.cell(1, 1).value is None:
-        product_sheet.delete_rows(1)
-    if product_sheet.cell(1, 1).value != "Period":
-        product_sheet.insert_rows(1)
-    if product_sheet.cell(1, 1).value != "Period":
-        product_sheet.cell(1, 1).value = "Period"
-        product_sheet.cell(1, 2).value = "Date/time"
-        product_sheet.cell(1, 3).value = "Product"
-        product_sheet.cell(1, 4).value = "Assigned licences"
-        product_sheet.cell(1, 5).value = "Unique users"
-        product_sheet.cell(1, 6).value = "Monthly cost (EUR)"
-    for row in summary:
-        product_sheet.append([
-            period, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row["product"],
-            row["licenses"], row["unique_users"], row["cost"],
-        ])
-    style_sheet(product_sheet)
-    for row in product_sheet.iter_rows(min_row=2, min_col=6, max_col=6):
-        row[0].number_format = '€#,##0.00'
-
-    user_sheet = wb["User History"] if "User History" in wb.sheetnames else wb.create_sheet("User History")
-    if user_sheet.max_row == 1 and user_sheet.cell(1, 1).value is None:
-        user_sheet.delete_rows(1)
-    if user_sheet.cell(1, 1).value != "Period":
-        user_sheet.insert_rows(1)
-    if user_sheet.cell(1, 1).value != "Period":
-        for column, header in enumerate([
-            "Period", "Account", "Name", "Email", "Cost center", "Manager",
-            "Licenses", "Monthly cost (EUR)", "Chargeable licenses", "Products",
-        ], 1):
-            user_sheet.cell(1, column).value = header
-    for user in user_costs:
-        user_sheet.append([
-            period, user["account"], user["name"], user["email"], user["costcenter"],
-            user["manager"], user["licenses"], user["cost"],
-            user["chargeable_licenses"], "; ".join(sorted(user["products"])),
-        ])
-    style_sheet(user_sheet)
-    for row in user_sheet.iter_rows(min_row=2, min_col=8, max_col=8):
-        row[0].number_format = '€#,##0.00'
-
-    wb.save(history_path)
-        source.name,
-        len(unique_users),
-        total_cost,
-        total_cost * 12,
         total_cost / len(unique_users) if unique_users else "n.a.",
         member_updated,
     ])
@@ -1052,7 +997,8 @@ def add_daily_joke_ticker(parent):
         "Why did the metric get a certificate?",
         "Why did the file name stay short?",
         "Why did the server bring a jacket?",
-        "Why did the team use a bookmark?        "Why did the chart bring a microphone?",
+        "Why did the team use a bookmark?",
+        "Why did the chart bring a microphone?",
         "Why did the formula take notes?",
         "Why did the laptop join the coffee queue?",
         "Why did the database tell a story?",
@@ -1156,15 +1102,10 @@ def show_startup_splash(root):
 
 def main():
     load_license_settings()
-    configure_windows_dpi()
     root = tk.Tk()
     root.title("T-Digital AI Cost Calculator")
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    initial_width = min(max(int(screen_width * 0.38), 560), 760)
-    initial_height = min(max(int(screen_height * 0.72), 620), 900)
-    root.geometry(f"{initial_width}x{initial_height}")
-    root.minsize(min(560, max(420, screen_width - 80)), min(620, max(460, screen_height - 100)))
+    root.geometry("560x470")
+    root.minsize(520, 430)
     root.resizable(True, True)
     root.configure(background="#f3f3f3")
     show_startup_splash(root)
@@ -1318,6 +1259,7 @@ def main():
                 )
         except Exception as exc:
             messagebox.showerror("Could not process report", str(exc), parent=root)
+
     def run_costcenter_export():
         nonlocal current_members, member_updated
         if not current_members and not update_members():
