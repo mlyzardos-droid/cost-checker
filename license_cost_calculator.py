@@ -8,12 +8,12 @@ The application opens the source Excel report and asks where to save the export.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 import json
 from pathlib import Path
 import random
+import re
 import shutil
-import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -407,25 +407,152 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     wb.save(destination)
 
 
-def append_history(source: Path, summary, unique_users, member_updated):
+def detect_reporting_period(source: Path):
+    """Find a YYYY-MM period in the report name/content when one is available."""
+    filename = source.stem
+    patterns = (
+        r"(?<!\d)(20\d{2})[-_.](0?[1-9]|1[0-2])(?!\d)",
+        r"(?<!\d)(0?[1-9]|1[0-2])[-_.](20\d{2})(?!\d)",
+    )
+    for index, pattern in enumerate(patterns):
+        match = re.search(pattern, filename)
+        if match:
+            year, month = match.groups() if index == 0 else (match.group(2), match.group(1))
+            return f"{year}-{int(month):02d}"
+
+    try:
+        workbook = load_workbook(source, data_only=True, read_only=True)
+        candidates = []
+        for sheet in workbook.worksheets:
+            rows = list(sheet.iter_rows(values_only=True))
+            for row_index, row in enumerate(rows):
+                for column_index, value in enumerate(row):
+                    text = clean(value).casefold()
+                    label_match = any(
+                        label in text
+                        for label in ("period", "report date", "as of", "month", "date")
+                    )
+                    nearby = row[column_index + 1] if column_index + 1 < len(row) else None
+                    values_to_check = (nearby,) if label_match else (value,)
+                    for candidate in values_to_check:
+                        if isinstance(candidate, (datetime, date)):
+                            return candidate.strftime("%Y-%m")
+                        candidate_text = clean(candidate)
+                        for pattern_index, pattern in enumerate(patterns):
+                            match = re.search(pattern, candidate_text)
+                            if match:
+                                year, month = match.groups() if pattern_index == 0 else (match.group(2), match.group(1))
+                                return f"{year}-{int(month):02d}"
+        workbook.close()
+    except Exception:
+        pass
+    return None
+
+
+def ask_reporting_period(root, source: Path):
+    """Use the report's period automatically and ask only when it is unavailable."""
+    detected = detect_reporting_period(source)
+    if detected:
+        return detected
+    default_period = datetime.now().strftime("%Y-%m")
+    while True:
+        value = simpledialog.askstring(
+            "Reporting period",
+            "Enter the report period (YYYY-MM), for example 2026-09:",
+            initialvalue=default_period,
+            parent=root,
+        )
+        if value is None:
+            return None
+        value = value.strip().replace("/", "-")
+        match = re.fullmatch(r"(\d{4})-(\d{1,2})", value)
+        if match and 1 <= int(match.group(2)) <= 12:
+            return f"{match.group(1)}-{int(match.group(2)):02d}"
+        messagebox.showerror("Invalid period", "Use the format YYYY-MM, for example 2026-09.", parent=root)
+
+
+def append_history(source: Path, period, summary, unique_users, user_costs, member_updated):
     history_path = history_file()
     if history_path.exists():
         wb = load_workbook(history_path)
         sheet = wb.active
+        headers = [clean(cell.value) for cell in sheet[1]]
+        if "Period" not in headers:
+            sheet.insert_cols(1)
+            sheet.cell(1, 1).value = "Period"
+            for row_number in range(2, sheet.max_row + 1):
+                old_timestamp = clean(sheet.cell(row_number, 2).value)
+                sheet.cell(row_number, 1).value = old_timestamp[:7] if len(old_timestamp) >= 7 else ""
     else:
         wb = Workbook()
         sheet = wb.active
         sheet.title = "History"
         sheet.append([
-            "Date/time", "Source report", "Unique AI users",
+            "Period", "Date/time", "Source report", "Unique AI users",
             "Monthly cost (EUR)", "12-month projection (EUR)", "Average cost/user (EUR)",
             "Costcenter data updated",
         ])
-    if sheet.cell(1, 7).value != "Costcenter data updated":
-        sheet.cell(1, 7).value = "Costcenter data updated"
+    if sheet.cell(1, 8).value != "Costcenter data updated":
+        sheet.cell(1, 8).value = "Costcenter data updated"
     total_cost = sum(row["cost"] or 0 for row in summary)
     sheet.append([
+        period,
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        source.name,
+        len(unique_users),
+        total_cost,
+        total_cost * 12,
+        total_cost / len(unique_users) if unique_users else 0,
+        member_updated,
+    ])
+    style_sheet(sheet)
+    for row in sheet.iter_rows(min_row=2, min_col=5, max_col=7):
+        for cell in row:
+            cell.number_format = '€#,##0.00'
+
+    product_sheet = wb["Product History"] if "Product History" in wb.sheetnames else wb.create_sheet("Product History")
+    if product_sheet.max_row == 1 and product_sheet.cell(1, 1).value is None:
+        product_sheet.delete_rows(1)
+    if product_sheet.cell(1, 1).value != "Period":
+        product_sheet.insert_rows(1)
+    if product_sheet.cell(1, 1).value != "Period":
+        product_sheet.cell(1, 1).value = "Period"
+        product_sheet.cell(1, 2).value = "Date/time"
+        product_sheet.cell(1, 3).value = "Product"
+        product_sheet.cell(1, 4).value = "Assigned licences"
+        product_sheet.cell(1, 5).value = "Unique users"
+        product_sheet.cell(1, 6).value = "Monthly cost (EUR)"
+    for row in summary:
+        product_sheet.append([
+            period, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row["product"],
+            row["licenses"], row["unique_users"], row["cost"],
+        ])
+    style_sheet(product_sheet)
+    for row in product_sheet.iter_rows(min_row=2, min_col=6, max_col=6):
+        row[0].number_format = '€#,##0.00'
+
+    user_sheet = wb["User History"] if "User History" in wb.sheetnames else wb.create_sheet("User History")
+    if user_sheet.max_row == 1 and user_sheet.cell(1, 1).value is None:
+        user_sheet.delete_rows(1)
+    if user_sheet.cell(1, 1).value != "Period":
+        user_sheet.insert_rows(1)
+    if user_sheet.cell(1, 1).value != "Period":
+        for column, header in enumerate([
+            "Period", "Account", "Name", "Email", "Cost center", "Manager",
+            "Licenses", "Monthly cost (EUR)", "Chargeable licenses", "Products",
+        ], 1):
+            user_sheet.cell(1, column).value = header
+    for user in user_costs:
+        user_sheet.append([
+            period, user["account"], user["name"], user["email"], user["costcenter"],
+            user["manager"], user["licenses"], user["cost"],
+            user["chargeable_licenses"], "; ".join(sorted(user["products"])),
+        ])
+    style_sheet(user_sheet)
+    for row in user_sheet.iter_rows(min_row=2, min_col=8, max_col=8):
+        row[0].number_format = '€#,##0.00'
+
+    wb.save(history_path)
         source.name,
         len(unique_users),
         total_cost,
@@ -436,7 +563,7 @@ def append_history(source: Path, summary, unique_users, member_updated):
     for cell in sheet[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="E20074")
-    for row in sheet.iter_rows(min_row=2, min_col=4, max_col=6):
+    for row in sheet.iter_rows(min_row=2, min_col=5, max_col=7):
         for cell in row:
             if isinstance(cell.value, (int, float)):
                 cell.number_format = '€#,##0.00'
@@ -449,22 +576,48 @@ def append_history(source: Path, summary, unique_users, member_updated):
     product_sheet = wb["Product History"] if "Product History" in wb.sheetnames else wb.create_sheet("Product History")
     if product_sheet.max_row == 1 and product_sheet.cell(1, 1).value is None:
         product_sheet.delete_rows(1, 1)
-        product_sheet.append(["Date/time", "Product", "Unique users", "Monthly cost (EUR)"])
-    elif product_sheet.max_row == 1 and product_sheet.cell(1, 1).value != "Date/time":
+        product_sheet.append(["Period", "Date/time", "Product", "Unique users", "Monthly cost (EUR)"])
+    elif product_sheet.cell(1, 1).value == "Date/time":
+        product_sheet.insert_cols(1)
+        product_sheet.cell(1, 1).value = "Period"
+        for row_number in range(2, product_sheet.max_row + 1):
+            timestamp_value = clean(product_sheet.cell(row_number, 2).value)
+            product_sheet.cell(row_number, 1).value = timestamp_value[:7] if len(timestamp_value) >= 7 else ""
+    elif product_sheet.cell(1, 1).value != "Period":
         product_sheet.delete_rows(1, product_sheet.max_row)
-        product_sheet.append(["Date/time", "Product", "Unique users", "Monthly cost (EUR)"])
+        product_sheet.append(["Period", "Date/time", "Product", "Unique users", "Monthly cost (EUR)"])
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for row in summary:
-        product_sheet.append([timestamp, row["product"], row["unique_users"], row["cost"] or 0])
+        product_sheet.append([period, timestamp, row["product"], row["unique_users"], row["cost"] or 0])
     for cell in product_sheet[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="E20074")
-    for row in product_sheet.iter_rows(min_row=2, min_col=4, max_col=4):
+    for row in product_sheet.iter_rows(min_row=2, min_col=5, max_col=5):
         row[0].number_format = '€#,##0.00'
     for column_cells in product_sheet.columns:
         width = min(max(len(clean(c.value)) for c in column_cells) + 2, 42)
         product_sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = width
     product_sheet.freeze_panes = "A2"
+
+    user_sheet = wb["User History"] if "User History" in wb.sheetnames else wb.create_sheet("User History")
+    if user_sheet.max_row == 1 and user_sheet.cell(1, 1).value is None:
+        user_sheet.delete_rows(1, 1)
+    if user_sheet.max_row == 1 and user_sheet.cell(1, 1).value != "Period":
+        user_sheet.delete_rows(1, user_sheet.max_row)
+        user_sheet.append([
+            "Period", "Account", "Name", "Email", "Cost center", "Manager",
+            "Licenses", "Monthly cost (EUR)", "Chargeable licenses", "Products",
+        ])
+    for user in user_costs:
+        user_sheet.append([
+            period, user["account"], user["name"], user["email"], user["costcenter"],
+            user["manager"], user["licenses"], user["cost"], user["chargeable_licenses"],
+            "; ".join(sorted(user["products"])),
+        ])
+    style_sheet(user_sheet)
+    for row in user_sheet.iter_rows(min_row=2, min_col=8, max_col=8):
+        row[0].number_format = '€#,##0.00'
+    user_sheet.freeze_panes = "A2"
     wb.save(history_path)
 
 
@@ -482,16 +635,18 @@ def show_history(root):
     if not rows:
         ttk.Label(window, text="No history available yet.", padding=30).pack()
         return
-    columns = ["date", "source", "users", "cost", "projection", "average", "members"]
+    columns = ["period", "date", "source", "users", "cost", "projection", "average", "members"]
     tree = ttk.Treeview(window, columns=columns, show="headings")
-    headings = ["Date/time", "Source report", "Unique AI users", "Monthly cost (EUR)", "12-month projection (EUR)", "Average/user (EUR)", "Costcenter data updated"]
-    widths = [155, 240, 110, 130, 170, 130, 160]
+    headings = ["Period", "Date/time", "Source report", "Unique AI users", "Monthly cost (EUR)", "12-month projection (EUR)", "Average/user (EUR)", "Costcenter data updated"]
+    widths = [85, 155, 240, 110, 130, 170, 130, 160]
     for key, heading, width in zip(columns, headings, widths):
         tree.heading(key, text=heading)
         tree.column(key, width=width, anchor="w")
     for row in rows[1:]:
-        values = list(row) + [""] * 7
-        tree.insert("", "end", values=values[:7])
+        values = list(row) + [""] * 8
+        if len(row) == 7:
+            values = [clean(row[0])[:7]] + list(row) + [""]
+        tree.insert("", "end", values=values[:8])
     tree.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=12)
     scrollbar = ttk.Scrollbar(window, orient="vertical", command=tree.yview)
     scrollbar.pack(side="right", fill="y", padx=(0, 12), pady=12)
@@ -513,6 +668,155 @@ def show_history(root):
     ttk.Button(window, text="Export History", command=export_history).pack(
         side="bottom", pady=(0, 12)
     )
+
+
+def _history_rows():
+    """Read period, product and user snapshots from the local history workbook."""
+    path = history_file()
+    if not path.exists():
+        return [], [], []
+    workbook = load_workbook(path, data_only=True, read_only=True)
+
+    def sheet_rows(name):
+        if name not in workbook.sheetnames:
+            return []
+        values = list(workbook[name].iter_rows(values_only=True))
+        if not values:
+            return []
+        headers = [clean(value) for value in values[0]]
+        return [dict(zip(headers, list(row) + [None] * len(headers))) for row in values[1:]]
+
+    return sheet_rows("History"), sheet_rows("Product History"), sheet_rows("User History")
+
+
+def show_comparison(root):
+    history_rows, product_rows, user_rows = _history_rows()
+    periods = sorted({clean(row.get("Period")) for row in history_rows if clean(row.get("Period"))})
+    if len(periods) < 2:
+        messagebox.showinfo(
+            "Not enough periods",
+            "At least two saved report periods are needed for a comparison.",
+            parent=root,
+        )
+        return
+
+    window = tk.Toplevel(root)
+    window.title("Compare Report Periods")
+    window.geometry("980x620")
+    window.transient(root)
+    window.grab_set()
+    controls = ttk.Frame(window)
+    controls.pack(fill="x", padx=16, pady=14)
+    ttk.Label(controls, text="Previous period:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+    ttk.Label(controls, text="Current period:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
+    previous = tk.StringVar(value=periods[-2])
+    current = tk.StringVar(value=periods[-1])
+    previous_combo = ttk.Combobox(controls, textvariable=previous, values=periods, state="readonly", width=16)
+    current_combo = ttk.Combobox(controls, textvariable=current, values=periods, state="readonly", width=16)
+    previous_combo.grid(row=0, column=1, padx=5, pady=5)
+    current_combo.grid(row=0, column=3, padx=5, pady=5)
+
+    output = tk.Text(window, height=27, wrap="word", state="disabled")
+    output.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+    def number_value(row, key):
+        value = row.get(key)
+        return float(value) if isinstance(value, (int, float)) else 0.0
+
+    def compare_data():
+        old_period, new_period = previous.get(), current.get()
+        old = next((row for row in history_rows if clean(row.get("Period")) == old_period), None)
+        new = next((row for row in reversed(history_rows) if clean(row.get("Period")) == new_period), None)
+        if not old or not new:
+            messagebox.showerror("Comparison error", "Could not find both selected periods.", parent=window)
+            return
+
+        old_users = {clean(row.get("Account")).casefold(): row for row in user_rows if clean(row.get("Period")) == old_period}
+        new_users = {clean(row.get("Account")).casefold(): row for row in user_rows if clean(row.get("Period")) == new_period}
+        added_users = sorted(set(new_users) - set(old_users))
+        removed_users = sorted(set(old_users) - set(new_users))
+        changed_users = sorted(
+            key for key in set(old_users) & set(new_users)
+            if clean(old_users[key].get("Manager")) != clean(new_users[key].get("Manager"))
+            or clean(old_users[key].get("Cost center")) != clean(new_users[key].get("Cost center"))
+            or number_value(old_users[key], "Monthly cost (EUR)") != number_value(new_users[key], "Monthly cost (EUR)")
+        )
+
+        old_products = {clean(row.get("Product")): row for row in product_rows if clean(row.get("Period")) == old_period}
+        new_products = {clean(row.get("Product")): row for row in product_rows if clean(row.get("Period")) == new_period}
+        product_names = sorted(set(old_products) | set(new_products))
+        total_old = number_value(old, "Monthly cost (EUR)")
+        total_new = number_value(new, "Monthly cost (EUR)")
+        user_old = number_value(old, "Unique AI users")
+        user_new = number_value(new, "Unique AI users")
+        lines = [
+            f"Comparison: {old_period} → {new_period}",
+            "=" * 72,
+            f"Monthly cost: €{total_old:,.2f} → €{total_new:,.2f}  ({total_new - total_old:+,.2f})",
+            f"Unique AI users: {int(user_old):,} → {int(user_new):,}  ({int(user_new - user_old):+,})",
+            f"Average cost/user: €{number_value(old, 'Average cost/user (EUR)'):,.2f} → €{number_value(new, 'Average cost/user (EUR)'):,.2f}",
+            "",
+            f"New users: {len(added_users)}",
+            "  " + (", ".join(added_users[:30]) if added_users else "None"),
+            f"Removed users: {len(removed_users)}",
+            "  " + (", ".join(removed_users[:30]) if removed_users else "None"),
+            f"Changed users (manager, cost center or cost): {len(changed_users)}",
+            "  " + (", ".join(changed_users[:30]) if changed_users else "None"),
+            "",
+            "License changes:",
+        ]
+        for name in product_names:
+            old_product = old_products.get(name, {})
+            new_product = new_products.get(name, {})
+            old_cost = number_value(old_product, "Monthly cost (EUR)")
+            new_cost = number_value(new_product, "Monthly cost (EUR)")
+            old_count = int(number_value(old_product, "Unique users"))
+            new_count = int(number_value(new_product, "Unique users"))
+            if old_cost != new_cost or old_count != new_count:
+                lines.append(f"  {name}: €{old_cost:,.2f} → €{new_cost:,.2f} ({new_cost - old_cost:+,.2f}), users {old_count} → {new_count}")
+        if len(lines) == 15:
+            lines.append("  No license changes")
+        output.configure(state="normal")
+        output.delete("1.0", "end")
+        output.insert("1.0", "\n".join(lines))
+        output.configure(state="disabled")
+
+    def export_comparison():
+        destination = filedialog.asksaveasfilename(
+            parent=window,
+            title="Export period comparison",
+            initialdir=str(export_directory()),
+            initialfile=f"AI_Cost_Comparison_{previous.get()}_to_{current.get()}.xlsx",
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+        )
+        if not destination:
+            return
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Comparison"
+        sheet.append(["Metric", "Previous period", "Current period", "Change"])
+        old = next(row for row in history_rows if clean(row.get("Period")) == previous.get())
+        new = next(row for row in reversed(history_rows) if clean(row.get("Period")) == current.get())
+        for label, key in [
+            ("Unique AI users", "Unique AI users"),
+            ("Monthly cost (EUR)", "Monthly cost (EUR)"),
+            ("12-month projection (EUR)", "12-month projection (EUR)"),
+            ("Average cost/user (EUR)", "Average cost/user (EUR)"),
+        ]:
+            before, after = number_value(old, key), number_value(new, key)
+            sheet.append([label, before, after, after - before])
+        style_sheet(sheet)
+        for row in sheet.iter_rows(min_row=3, min_col=2, max_col=5):
+            for cell in row:
+                if cell.column != 2 or row[0].row > 1:
+                    cell.number_format = '€#,##0.00' if row[0].row != 2 else '0'
+        workbook.save(destination)
+        messagebox.showinfo("Comparison exported", f"Saved to:\n{destination}", parent=window)
+
+    ttk.Button(controls, text="Compare", command=compare_data).grid(row=0, column=4, padx=(18, 5), pady=5)
+    ttk.Button(controls, text="Export Comparison", command=export_comparison).grid(row=0, column=5, padx=5, pady=5)
+    compare_data()
 
 
 def choose_costcenter(root, members):
@@ -748,8 +1052,7 @@ def add_daily_joke_ticker(parent):
         "Why did the metric get a certificate?",
         "Why did the file name stay short?",
         "Why did the server bring a jacket?",
-        "Why did the team use a bookmark?",
-        "Why did the chart bring a microphone?",
+        "Why did the team use a bookmark?        "Why did the chart bring a microphone?",
         "Why did the formula take notes?",
         "Why did the laptop join the coffee queue?",
         "Why did the database tell a story?",
@@ -849,21 +1152,6 @@ def show_startup_splash(root):
         root.lift()
 
     splash.after(1500, finish)
-
-
-def configure_windows_dpi():
-    """Let Windows provide logical pixels so the UI is correct at any DPI."""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
-    except (AttributeError, OSError):
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        except (AttributeError, OSError):
-            pass
 
 
 def main():
@@ -997,6 +1285,9 @@ def main():
             if not detail:
                 raise ValueError("No matching AI services were found.")
             update_preview(summary, unique_users, without_license)
+            period = ask_reporting_period(root, source)
+            if not period:
+                return
             default_name = f"AI_License_Cost_Summary_{datetime.now():%Y%m%d_%H%M}.xlsx"
             destination_dir = export_directory()
             destination_name = filedialog.asksaveasfilename(
@@ -1013,7 +1304,7 @@ def main():
                     user_costs, without_license,
                     user_licenses,
                 )
-                append_history(source, summary, unique_users, member_updated)
+                append_history(source, period, summary, unique_users, user_costs, member_updated)
                 total_cost = sum(row["cost"] or 0 for row in summary)
                 average = total_cost / len(unique_users) if unique_users else 0
                 messagebox.showinfo(
@@ -1027,7 +1318,6 @@ def main():
                 )
         except Exception as exc:
             messagebox.showerror("Could not process report", str(exc), parent=root)
-
     def run_costcenter_export():
         nonlocal current_members, member_updated
         if not current_members and not update_members():
@@ -1306,7 +1596,8 @@ def main():
     ttk.Button(data_frame, text="Select / Change AD Report", style="Telekom.TButton", command=select_source_report).grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Button(data_frame, text="Update Costcenter Members", style="Telekom.TButton", command=update_members).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
     ttk.Button(data_frame, text="View History", style="Telekom.TButton", command=lambda: show_history(root)).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
-    ttk.Button(data_frame, text="License Settings", style="Telekom.TButton", command=lambda: manage_licenses(root)).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(data_frame, text="Compare Periods", style="Telekom.TButton", command=lambda: show_comparison(root)).grid(row=2, column=0, sticky="ew", padx=3, pady=3)
+    ttk.Button(data_frame, text="License Settings", style="Telekom.TButton", command=lambda: manage_licenses(root)).grid(row=2, column=1, sticky="ew", padx=3, pady=3)
     ttk.Button(content, text="Exit", style="Telekom.TButton", command=root.destroy).pack(fill="x", padx=37, pady=(16, 6))
     root.mainloop()
 
