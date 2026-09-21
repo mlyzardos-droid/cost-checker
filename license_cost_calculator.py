@@ -274,7 +274,9 @@ def calculate(services, members=None, include_non_ai=False):
             record = user_costs.setdefault(key, {
                 "account": account, "name": user["username"], "email": "",
                 "costcenter": "", "manager": "", "licenses": 0, "cost": 0.0,
-                "products": set(), "chargeable_licenses": 0,
+                "products": set(), "license_names": set(),
+                "ai_license_names": set(), "non_ai_license_names": set(),
+                "chargeable_licenses": 0,
                 "ai_licenses": 0, "ai_cost": 0.0,
                 "non_ai_licenses": 0, "non_ai_cost": 0.0,
             })
@@ -285,12 +287,15 @@ def calculate(services, members=None, include_non_ai=False):
             record["manager"] = member.get("manager", "")
             record["licenses"] += 1
             record["products"].add(product)
+            record["license_names"].add(item["service"])
             if item["service"] in PRODUCT_PRICES:
                 record["ai_licenses"] += 1
+                record["ai_license_names"].add(item["service"])
                 if price is not None:
                     record["ai_cost"] += price
             else:
                 record["non_ai_licenses"] += 1
+                record["non_ai_license_names"].add(item["service"])
                 if price is not None:
                     record["non_ai_cost"] += price
             if price is not None and price > 0:
@@ -437,15 +442,19 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     if full_license_report:
         user_cost_sheet.append([
             "Account", "Name", "Email", "Cost center", "Cost center manager",
-            "AI licences", "AI monthly cost (EUR)", "Non-AI licences",
-            "Non-AI monthly cost (EUR)", "Total licences", "Total monthly cost (EUR)",
+            "AI licences (count)", "AI license names", "AI monthly cost (EUR)",
+            "Non-AI licences (count)", "Non-AI license names", "Non-AI monthly cost (EUR)",
+            "Total licences", "All license names", "Total monthly cost (EUR)",
             "12-month projection (EUR)",
         ])
         for user in user_costs:
             user_cost_sheet.append([
                 user["account"], user["name"], user["email"], user["costcenter"],
-                user["manager"], user["ai_licenses"], user["ai_cost"],
-                user["non_ai_licenses"], user["non_ai_cost"], user["licenses"],
+                user["manager"], user["ai_licenses"],
+                "; ".join(sorted(user["ai_license_names"])), user["ai_cost"],
+                user["non_ai_licenses"],
+                "; ".join(sorted(user["non_ai_license_names"])), user["non_ai_cost"],
+                user["licenses"], "; ".join(sorted(user["license_names"])),
                 user["cost"], user["cost"] * 12,
             ])
     else:
@@ -461,7 +470,7 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
                 user["cost"], user["chargeable_licenses"], user["cost"] * 12,
             ])
     style_sheet(user_cost_sheet)
-    money_columns = (7, 9, 11, 12) if full_license_report else (8, 10)
+    money_columns = (8, 11, 14, 15) if full_license_report else (8, 10)
     for row in user_cost_sheet.iter_rows(min_row=2, min_col=1, max_col=user_cost_sheet.max_column):
         for cell in row:
             if cell.column in money_columns and isinstance(cell.value, (int, float)):
