@@ -347,6 +347,12 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     overview.append(["Source report", source.name])
     overview.append(["Created", datetime.now().strftime("%Y-%m-%d %H:%M")])
     overview.append(["Unique licensed users" if full_license_report else "Unique AI users", len(unique_users)])
+    total_members = len(unique_users) + len(without_license)
+    licensed_percentage = (len(unique_users) / total_members * 100) if total_members else 0
+    overview.append([
+        "Users with any license (%)" if full_license_report else "Users with AI license (%)",
+        licensed_percentage,
+    ])
     overview.append(["Total monthly cost (EUR)", total_cost])
     overview.append(["12-month projection (EUR)", total_cost * 12])
     overview.append([
@@ -358,13 +364,15 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     for row in summary:
         overview.append([row["product"], row["licenses"], row["unique_users"], row["cost"], row["cost"] * 12])
     style_sheet(overview)
-    for row_number in (5, 6, 7):
+    overview.cell(5, 2).number_format = '0.00%'
+    overview.cell(5, 2).value = licensed_percentage / 100
+    for row_number in (6, 7, 8):
         overview.cell(row_number, 2).number_format = '€#,##0.00'
-    for cell in overview[8]:
+    for cell in overview[10]:
         cell.fill = PatternFill("solid", fgColor="E20074")
         cell.font = Font(color="FFFFFF", bold=True)
         cell.alignment = Alignment(horizontal="center")
-    for row in overview.iter_rows(min_row=9, min_col=4, max_col=5):
+    for row in overview.iter_rows(min_row=11, min_col=4, max_col=5):
         for cell in row:
             if isinstance(cell.value, (int, float)):
                 cell.number_format = '€#,##0.00'
