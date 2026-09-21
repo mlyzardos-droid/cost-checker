@@ -275,6 +275,8 @@ def calculate(services, members=None, include_non_ai=False):
                 "account": account, "name": user["username"], "email": "",
                 "costcenter": "", "manager": "", "licenses": 0, "cost": 0.0,
                 "products": set(), "chargeable_licenses": 0,
+                "ai_licenses": 0, "ai_cost": 0.0,
+                "non_ai_licenses": 0, "non_ai_cost": 0.0,
             })
             member = members.get(key, {})
             record["name"] = member.get("name") or record["name"]
@@ -283,6 +285,14 @@ def calculate(services, members=None, include_non_ai=False):
             record["manager"] = member.get("manager", "")
             record["licenses"] += 1
             record["products"].add(product)
+            if item["service"] in PRODUCT_PRICES:
+                record["ai_licenses"] += 1
+                if price is not None:
+                    record["ai_cost"] += price
+            else:
+                record["non_ai_licenses"] += 1
+                if price is not None:
+                    record["non_ai_cost"] += price
             if price is not None and price > 0:
                 record["chargeable_licenses"] += 1
             if price is not None:
@@ -363,6 +373,18 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     overview.append(["Product", "Assigned licences", "Unique users", "Monthly cost (EUR)", "12-month projection (EUR)"])
     for row in summary:
         overview.append([row["product"], row["licenses"], row["unique_users"], row["cost"], row["cost"] * 12])
+    if full_license_report:
+        overview.append([])
+        overview.append(["License type", "Assigned licences", "Unique users", "Monthly cost (EUR)", "12-month projection (EUR)"])
+        for license_type in ("AI", "Non-AI"):
+            type_rows = [row for row in detail if ("AI" if row["service"] in PRODUCT_PRICES else "Non-AI") == license_type]
+            type_cost = sum(row["cost"] or 0 for row in type_rows)
+            type_licenses = sum(row["licenses"] for row in type_rows)
+            type_unique_users = sum(
+                user["ai_licenses"] > 0 if license_type == "AI" else user["non_ai_licenses"] > 0
+                for user in user_costs
+            )
+            overview.append([license_type, type_licenses, type_unique_users, type_cost, type_cost * 12])
     style_sheet(overview)
     overview.cell(5, 2).number_format = '0.00%'
     overview.cell(5, 2).value = licensed_percentage / 100
@@ -396,35 +418,37 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
                 cell.number_format = '€#,##0.00'
 
     user_cost_sheet = wb.create_sheet("User Costs")
-    user_cost_sheet.append([
-        "Account", "Name", "Email", "Cost center", "Cost center manager",
-        "All licenses" if full_license_report else "AI licences", "Monthly cost (EUR)",
-    ])
-    for user in user_costs:
+    if full_license_report:
         user_cost_sheet.append([
-            user["account"], user["name"], user["email"], user["costcenter"],
-            user["manager"], user["licenses"], user["cost"],
+            "Account", "Name", "Email", "Cost center", "Cost center manager",
+            "AI licences", "AI monthly cost (EUR)", "Non-AI licences",
+            "Non-AI monthly cost (EUR)", "Total licences", "Total monthly cost (EUR)",
+            "12-month projection (EUR)",
         ])
-    style_sheet(user_cost_sheet)
-    for row in user_cost_sheet.iter_rows(min_row=2, min_col=7, max_col=7):
-        row[0].number_format = '€#,##0.00'
-
-    user_cost_sheet.delete_rows(1, user_cost_sheet.max_row)
-    user_cost_sheet.append([
-        "Account", "Name", "Email", "Cost center", "Cost center manager",
-        "Licenses assigned", "AI licences", "Monthly cost (EUR)",
-        "Chargeable licences", "12-month projection (EUR)",
-    ])
-    for user in user_costs:
+        for user in user_costs:
+            user_cost_sheet.append([
+                user["account"], user["name"], user["email"], user["costcenter"],
+                user["manager"], user["ai_licenses"], user["ai_cost"],
+                user["non_ai_licenses"], user["non_ai_cost"], user["licenses"],
+                user["cost"], user["cost"] * 12,
+            ])
+    else:
         user_cost_sheet.append([
-            user["account"], user["name"], user["email"], user["costcenter"],
-            user["manager"], "; ".join(sorted(user["products"])), user["licenses"],
-            user["cost"], user["chargeable_licenses"], user["cost"] * 12,
+            "Account", "Name", "Email", "Cost center", "Cost center manager",
+            "Licenses assigned", "AI licences", "Monthly cost (EUR)",
+            "Chargeable licences", "12-month projection (EUR)",
         ])
+        for user in user_costs:
+            user_cost_sheet.append([
+                user["account"], user["name"], user["email"], user["costcenter"],
+                user["manager"], "; ".join(sorted(user["products"])), user["licenses"],
+                user["cost"], user["chargeable_licenses"], user["cost"] * 12,
+            ])
     style_sheet(user_cost_sheet)
-    for row in user_cost_sheet.iter_rows(min_row=2, min_col=8, max_col=10):
+    money_columns = (7, 9, 11, 12) if full_license_report else (8, 10)
+    for row in user_cost_sheet.iter_rows(min_row=2, min_col=1, max_col=user_cost_sheet.max_column):
         for cell in row:
-            if cell.column in (8, 10) and isinstance(cell.value, (int, float)):
+            if cell.column in money_columns and isinstance(cell.value, (int, float)):
                 cell.number_format = '€#,##0.00'
 
     without_sheet = wb.create_sheet("Users Without Any License" if full_license_report else "Users Without AI License")
@@ -736,10 +760,13 @@ def choose_manager(root, members):
     return result["value"]
 
 
-def choose_licenses(root, services):
-    available = sorted({item["service"] for item in services if item["service"] in active_license_names()})
+def choose_licenses(root, services, include_non_ai=False):
+    allowed = active_license_names()
+    if include_non_ai:
+        allowed |= active_non_ai_license_names()
+    available = sorted({item["service"] for item in services if item["service"] in allowed})
     if not available:
-        messagebox.showerror("No AI licenses", "No configured AI licenses were found in the report.", parent=root)
+        messagebox.showerror("No licenses", "No configured licenses were found in the report.", parent=root)
         return None
     window = tk.Toplevel(root)
     window.title("Select Licenses")
@@ -782,6 +809,17 @@ def ask_for_emails(root):
     ttk.Button(window, text="Continue", command=confirm).pack(pady=12)
     root.wait_window(window)
     return result["emails"]
+
+
+def choose_export_scope(root, export_name):
+    """Ask whether a filtered export should contain AI licenses or all licenses."""
+    return messagebox.askyesno(
+        "Choose report type",
+        f"{export_name}\n\n"
+        "Yes = Full license report (AI + non-AI)\n"
+        "No = AI-only report",
+        parent=root,
+    )
 
 
 def manage_licenses(root):
@@ -1167,6 +1205,7 @@ def main():
         source = get_source_report()
         if not source:
             return
+        full_license_report = choose_export_scope(root, "Export selected users by email")
         try:
             if not current_members and not update_members():
                 return
@@ -1261,6 +1300,7 @@ def main():
         costcenter = choose_costcenter(root, current_members)
         if not costcenter:
             return
+        full_license_report = choose_export_scope(root, f"Export for cost center: {costcenter}")
         try:
             services = read_report(source)
             selected_members = {
@@ -1277,11 +1317,12 @@ def main():
                     selected_item["reported_total"] = len(users)
                     selected_services.append(selected_item)
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
-                selected_services, selected_members
+                selected_services, selected_members, include_non_ai=full_license_report
             )
             if not detail:
                 raise ValueError(f"No AI licences found for cost center {costcenter}.")
-            default_name = f"AI_License_Cost_{costcenter}_{datetime.now():%Y%m%d_%H%M}.xlsx"
+            prefix = "Full_License_Report" if full_license_report else "AI_License_Cost"
+            default_name = f"{prefix}_{costcenter}_{datetime.now():%Y%m%d_%H%M}.xlsx"
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save cost center export",
@@ -1291,7 +1332,11 @@ def main():
                 filetypes=[("Excel files", "*.xlsx")],
             )
             if destination_name:
-                export_report(Path(destination_name), source, summary, detail, unique_users, user_costs, without_license, user_licenses)
+                export_report(
+                    Path(destination_name), source, summary, detail, unique_users,
+                    user_costs, without_license, user_licenses,
+                    full_license_report=full_license_report,
+                )
                 messagebox.showinfo(
                     "Cost center export complete",
                     f"Cost center: {costcenter}\n"
@@ -1313,6 +1358,7 @@ def main():
         manager = choose_manager(root, current_members)
         if not manager:
             return
+        full_license_report = choose_export_scope(root, f"Export for manager: {manager}")
         try:
             services = read_report(source)
             selected_members = {
@@ -1332,12 +1378,13 @@ def main():
                     selected_item["reported_total"] = len(users)
                     selected_services.append(selected_item)
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
-                selected_services, selected_members
+                selected_services, selected_members, include_non_ai=full_license_report
             )
             if not detail:
                 raise ValueError(f"No AI licences found for manager {manager}.")
             safe_manager = "_".join(manager.split())[:60]
-            default_name = f"AI_License_Cost_Manager_{safe_manager}_{datetime.now():%Y%m%d_%H%M}.xlsx"
+            prefix = "Full_License_Report_Manager" if full_license_report else "AI_License_Cost_Manager"
+            default_name = f"{prefix}_{safe_manager}_{datetime.now():%Y%m%d_%H%M}.xlsx"
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save manager export",
@@ -1350,6 +1397,7 @@ def main():
                 export_report(
                     Path(destination_name), source, summary, detail,
                     unique_users, user_costs, without_license, user_licenses,
+                    full_license_report=full_license_report,
                 )
                 messagebox.showinfo(
                     "Manager export complete",
@@ -1391,9 +1439,10 @@ def main():
                     selected_item["reported_total"] = len(users)
                     selected_services.append(selected_item)
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
-                selected_services, selected_members
+                selected_services, selected_members, include_non_ai=full_license_report
             )
-            default_name = f"AI_License_Cost_Selected_Users_{datetime.now():%Y%m%d_%H%M}.xlsx"
+            prefix = "Full_License_Report_Selected_Users" if full_license_report else "AI_License_Cost_Selected_Users"
+            default_name = f"{prefix}_{datetime.now():%Y%m%d_%H%M}.xlsx"
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save selected users export",
@@ -1407,6 +1456,7 @@ def main():
                     Path(destination_name), source, summary, detail,
                     unique_users, user_costs, without_license, user_licenses,
                     missing_emails,
+                    full_license_report=full_license_report,
                 )
                 messagebox.showinfo(
                     "Selected users export complete",
@@ -1427,9 +1477,12 @@ def main():
         source = get_source_report()
         if not source:
             return
+        full_license_report = choose_export_scope(root, "Export users with multiple chargeable licenses")
         try:
             services = read_report(source)
-            _, _, _, all_user_costs, _, _ = calculate(services, current_members)
+            _, _, _, all_user_costs, _, _ = calculate(
+                services, current_members, include_non_ai=full_license_report
+            )
             selected_accounts = {
                 user["account"].casefold() for user in all_user_costs
                 if user["chargeable_licenses"] > 1
@@ -1447,13 +1500,13 @@ def main():
                     selected_item["reported_total"] = len(users)
                     selected_services.append(selected_item)
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
-                selected_services, selected_members
+                selected_services, selected_members, include_non_ai=full_license_report
             )
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save multiple-license users export",
                 initialdir=str(export_directory()),
-                initialfile=f"AI_Users_Multiple_Chargeable_Licenses_{datetime.now():%Y%m%d_%H%M}.xlsx",
+                initialfile=f"{'Full_License_Report' if full_license_report else 'AI'}_Users_Multiple_Chargeable_Licenses_{datetime.now():%Y%m%d_%H%M}.xlsx",
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
             )
@@ -1461,6 +1514,7 @@ def main():
                 export_report(
                     Path(destination_name), source, summary, detail, unique_users,
                     user_costs, without_license, user_licenses,
+                    full_license_report=full_license_report,
                 )
                 messagebox.showinfo(
                     "Export complete",
@@ -1480,18 +1534,19 @@ def main():
             return
         try:
             services = read_report(source)
-            selected_names = choose_licenses(root, services)
+            full_license_report = choose_export_scope(root, "Export selected licenses")
+            selected_names = choose_licenses(root, services, include_non_ai=full_license_report)
             if not selected_names:
                 return
             selected_services = [item for item in services if item["service"] in selected_names]
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
-                selected_services, current_members
+                selected_services, current_members, include_non_ai=full_license_report
             )
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save selected licenses export",
                 initialdir=str(export_directory()),
-                initialfile=f"AI_License_Cost_Selected_Licenses_{datetime.now():%Y%m%d_%H%M}.xlsx",
+                initialfile=f"{'Full_License_Report' if full_license_report else 'AI_License_Cost'}_Selected_Licenses_{datetime.now():%Y%m%d_%H%M}.xlsx",
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
             )
@@ -1499,6 +1554,7 @@ def main():
                 export_report(
                     Path(destination_name), source, summary, detail,
                     unique_users, user_costs, without_license, user_licenses,
+                    full_license_report=full_license_report,
                 )
                 messagebox.showinfo(
                     "Selected licenses export complete",
@@ -1515,7 +1571,7 @@ def main():
     exports.pack(fill="x", padx=34)
     exports.columnconfigure(0, weight=1)
     exports.columnconfigure(1, weight=1)
-    ttk.Button(exports, text="Calculate from Excel report", style="Telekom.TButton", command=run_calculator).grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="AI Cost Calculator - Basic Report", style="Telekom.TButton", command=run_calculator).grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Button(exports, text="Export Cost Center", style="Telekom.TButton", command=run_costcenter_export).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
     ttk.Button(exports, text="Export by User Emails", style="Telekom.TButton", command=run_email_export).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
     ttk.Button(exports, text="Export by Cost Center Manager", style="Telekom.TButton", command=run_manager_export).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
