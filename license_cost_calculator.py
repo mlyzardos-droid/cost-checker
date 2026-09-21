@@ -341,7 +341,7 @@ def style_sheet(sheet):
 def export_report(destination: Path, source: Path, summary, detail, unique_users, user_costs, without_license, user_licenses, missing_emails=None, full_license_report=False):
     wb = Workbook()
     overview = wb.active
-    overview.title = "Summary"
+    overview.title = "AI Cost Calculator"
     overview.append(["Metric", "Value"])
     total_cost = sum(row["cost"] or 0 for row in summary)
     overview.append(["Source report", source.name])
@@ -1175,7 +1175,7 @@ def main():
             if not detail:
                 raise ValueError("No matching AI services were found.")
             update_preview(summary, unique_users, without_license)
-            default_name = f"AI_License_Cost_Summary_{datetime.now():%Y%m%d_%H%M}.xlsx"
+            default_name = f"AI_Cost_Calculator_{datetime.now():%Y%m%d_%H%M}.xlsx"
             destination_dir = export_directory()
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
