@@ -366,10 +366,22 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     overview.append(["Total monthly cost (EUR)", total_cost])
     overview.append(["12-month projection (EUR)", total_cost * 12])
     overview.append([
-        "Average cost per unique AI user (EUR)",
+        "Average cost per licensed user (EUR)" if full_license_report else "Average cost per unique AI user (EUR)",
         total_cost / len(unique_users) if unique_users else "n.a.",
     ])
+    if full_license_report:
+        ai_users = sum(user["ai_licenses"] > 0 for user in user_costs)
+        ai_cost = sum(user["ai_cost"] for user in user_costs)
+        ai_percentage = (ai_users / total_members * 100) if total_members else 0
+        overview.append([])
+        overview.append(["AI-only summary", ""])
+        overview.append(["Unique AI users", ai_users])
+        overview.append(["Users with AI license (%)", ai_percentage / 100])
+        overview.append(["AI monthly cost (EUR)", ai_cost])
+        overview.append(["AI 12-month projection (EUR)", ai_cost * 12])
+        overview.append(["Average cost per unique AI user (EUR)", ai_cost / ai_users if ai_users else "n.a."])
     overview.append([])
+    product_header_row = overview.max_row + 1
     overview.append(["Product", "Assigned licences", "Unique users", "Monthly cost (EUR)", "12-month projection (EUR)"])
     for row in summary:
         overview.append([row["product"], row["licenses"], row["unique_users"], row["cost"], row["cost"] * 12])
@@ -390,11 +402,15 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     overview.cell(5, 2).value = licensed_percentage / 100
     for row_number in (6, 7, 8):
         overview.cell(row_number, 2).number_format = '€#,##0.00'
-    for cell in overview[10]:
+    if full_license_report:
+        overview.cell(12, 2).number_format = '0.00%'
+        for row_number in (13, 14, 15):
+            overview.cell(row_number, 2).number_format = '€#,##0.00'
+    for cell in overview[product_header_row]:
         cell.fill = PatternFill("solid", fgColor="E20074")
         cell.font = Font(color="FFFFFF", bold=True)
         cell.alignment = Alignment(horizontal="center")
-    for row in overview.iter_rows(min_row=11, min_col=4, max_col=5):
+    for row in overview.iter_rows(min_row=product_header_row + 1, min_col=4, max_col=5):
         for cell in row:
             if isinstance(cell.value, (int, float)):
                 cell.number_format = '€#,##0.00'
@@ -1248,7 +1264,6 @@ def main():
         source = get_source_report()
         if not source:
             return
-        full_license_report = choose_export_scope(root, "Export selected users by email")
         try:
             if not current_members and not update_members():
                 return
@@ -1420,6 +1435,7 @@ def main():
         source = get_source_report()
         if not source:
             return
+        full_license_report = choose_export_scope(root, "Export selected users by email")
         try:
             email_to_account = {
                 value.get("email", "").casefold(): key
