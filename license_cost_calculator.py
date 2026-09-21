@@ -19,6 +19,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 try:
     from openpyxl import Workbook, load_workbook
+    from openpyxl.chart import LineChart, Reference
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 except ImportError:
@@ -42,8 +43,13 @@ PRODUCT_PRICES = {
     "GitHub Copilot Upgrade Package 1 for advanced use": ("GitHub Copilot Upgrade - Advanced", 100.00),
     "GitHub Copilot Upgrade Package 2 for intensive use": ("GitHub Copilot Upgrade - Intensive", 250.00),
 }
+NON_AI_PRODUCT_PRICES = {
+    "Bitwarden": ("Bitwarden", 0.60),
+    "Miro Enterprise License": ("Miro Enterprise", 9.00),
+}
 DEFAULT_PRODUCT_PRICES = dict(PRODUCT_PRICES)
 LICENSE_ACTIVE = {name: True for name in PRODUCT_PRICES}
+NON_AI_LICENSE_ACTIVE = {name: True for name in NON_AI_PRODUCT_PRICES}
 
 def export_directory() -> Path:
     """Find the user's Desktop/AI Cost folder, including common OneDrive layouts."""
@@ -86,7 +92,8 @@ def load_license_settings():
     try:
         with path.open("r", encoding="utf-8") as file:
             settings = json.load(file)
-        for name, values in settings.items():
+        sections = settings if any(key in settings for key in ("ai", "non_ai")) else {"ai": settings}
+        for name, values in sections.get("ai", {}).items():
             if not isinstance(values, dict):
                 continue
             price = number(values.get("price"))
@@ -95,14 +102,29 @@ def load_license_settings():
             product = clean(values.get("product")) or name
             PRODUCT_PRICES[name] = (product, price)
             LICENSE_ACTIVE[name] = bool(values.get("active", True))
+        for name, values in sections.get("non_ai", {}).items():
+            if not isinstance(values, dict):
+                continue
+            price = number(values.get("price"))
+            if price is None:
+                continue
+            product = clean(values.get("product")) or name
+            NON_AI_PRODUCT_PRICES[name] = (product, price)
+            NON_AI_LICENSE_ACTIVE[name] = bool(values.get("active", True))
     except (OSError, json.JSONDecodeError):
         return
 
 
 def save_license_settings():
     settings = {
-        name: {"product": product, "price": price, "active": LICENSE_ACTIVE.get(name, True)}
-        for name, (product, price) in PRODUCT_PRICES.items()
+        "ai": {
+            name: {"product": product, "price": price, "active": LICENSE_ACTIVE.get(name, True)}
+            for name, (product, price) in PRODUCT_PRICES.items()
+        },
+        "non_ai": {
+            name: {"product": product, "price": price, "active": NON_AI_LICENSE_ACTIVE.get(name, True)}
+            for name, (product, price) in NON_AI_PRODUCT_PRICES.items()
+        },
     }
     with license_settings_file().open("w", encoding="utf-8") as file:
         json.dump(settings, file, ensure_ascii=False, indent=2)
@@ -110,6 +132,10 @@ def save_license_settings():
 
 def active_license_names():
     return {name for name in PRODUCT_PRICES if LICENSE_ACTIVE.get(name, True)}
+
+
+def active_non_ai_license_names():
+    return {name for name in NON_AI_PRODUCT_PRICES if NON_AI_LICENSE_ACTIVE.get(name, True)}
 
 
 def load_saved_members():
@@ -197,8 +223,13 @@ def read_costcenter_report(source: Path):
     return members
 
 
-def calculate(services, members=None):
+def calculate(services, members=None, include_non_ai=False):
     members = members or {}
+    catalog = dict(PRODUCT_PRICES)
+    active_names = active_license_names()
+    if include_non_ai:
+        catalog.update(NON_AI_PRODUCT_PRICES)
+        active_names |= active_non_ai_license_names()
     detail = []
     unique_users = set()
     totals = defaultdict(lambda: {"users": set(), "licenses": 0, "cost": 0.0, "priced": True})
@@ -206,9 +237,9 @@ def calculate(services, members=None):
     user_licenses = []
 
     for item in services:
-        if item["service"] not in active_license_names():
+        if item["service"] not in active_names:
             continue
-        product, price = PRODUCT_PRICES[item["service"]]
+        product, price = catalog[item["service"]]
         accounts = {
             u["account"] or u["username"]
             for u in item["users"]
@@ -306,7 +337,7 @@ def style_sheet(sheet):
         sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = width
 
 
-def export_report(destination: Path, source: Path, summary, detail, unique_users, user_costs, without_license, user_licenses, missing_emails=None):
+def export_report(destination: Path, source: Path, summary, detail, unique_users, user_costs, without_license, user_licenses, missing_emails=None, full_license_report=False):
     wb = Workbook()
     overview = wb.active
     overview.title = "Summary"
@@ -314,7 +345,7 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     total_cost = sum(row["cost"] or 0 for row in summary)
     overview.append(["Source report", source.name])
     overview.append(["Created", datetime.now().strftime("%Y-%m-%d %H:%M")])
-    overview.append(["Unique AI users", len(unique_users)])
+    overview.append(["Unique licensed users" if full_license_report else "Unique AI users", len(unique_users)])
     overview.append(["Total monthly cost (EUR)", total_cost])
     overview.append(["12-month projection (EUR)", total_cost * 12])
     overview.append([
@@ -337,26 +368,28 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
             if isinstance(cell.value, (int, float)):
                 cell.number_format = '€#,##0.00'
 
-    detail_sheet = wb.create_sheet("Details")
-    detail_sheet.append(
-        ["Product", "Report service", "Material number", "Assigned licences", "Price/user/month (EUR)", "Monthly cost (EUR)", "Users found"]
-    )
+    detail_sheet = wb.create_sheet("All Licenses" if full_license_report else "Details")
+    detail_headers = ["Product", "Report service", "Material number", "Assigned licences", "Price/user/month (EUR)", "Monthly cost (EUR)", "Users found"]
+    if full_license_report:
+        detail_headers.insert(1, "License type")
+    detail_sheet.append(detail_headers)
     for row in detail:
-        detail_sheet.append([
-            row["product"], row["service"], row["material"], row["licenses"],
-            row["price"], row["cost"], row["users"],
-        ])
+        values = [row["product"], row["service"], row["material"], row["licenses"], row["price"], row["cost"], row["users"]]
+        if full_license_report:
+            values.insert(1, "AI" if row["service"] in PRODUCT_PRICES else "Non-AI")
+        detail_sheet.append(values)
     style_sheet(detail_sheet)
-    for row in detail_sheet.iter_rows(min_row=2, min_col=5, max_col=6):
-        if isinstance(row[0].value, (int, float)):
-            row[0].number_format = '€#,##0.00'
-        if isinstance(row[1].value, (int, float)):
-            row[1].number_format = '€#,##0.00'
+    price_column = 6 if full_license_report else 5
+    cost_column = 7 if full_license_report else 6
+    for row in detail_sheet.iter_rows(min_row=2, min_col=price_column, max_col=cost_column):
+        for cell in row:
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = '€#,##0.00'
 
     user_cost_sheet = wb.create_sheet("User Costs")
     user_cost_sheet.append([
         "Account", "Name", "Email", "Cost center", "Cost center manager",
-        "AI licences", "Monthly cost (EUR)",
+        "All licenses" if full_license_report else "AI licences", "Monthly cost (EUR)",
     ])
     for user in user_costs:
         user_cost_sheet.append([
@@ -385,7 +418,7 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
             if cell.column in (8, 10) and isinstance(cell.value, (int, float)):
                 cell.number_format = '€#,##0.00'
 
-    without_sheet = wb.create_sheet("Users Without AI License")
+    without_sheet = wb.create_sheet("Users Without Any License" if full_license_report else "Users Without AI License")
     without_sheet.append([
         "Account", "Name", "Email", "Cost center", "Cost center manager",
     ])
@@ -407,22 +440,29 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     wb.save(destination)
 
 
-def append_history(source: Path, summary, unique_users, member_updated):
+def append_history(
+    source: Path, summary, unique_users, without_license_count, member_updated,
+    history_sheet_name="History", product_sheet_name="Product History",
+    full_license_report=False,
+):
     history_path = history_file()
     if history_path.exists():
         wb = load_workbook(history_path)
-        sheet = wb.active
+        sheet = wb[history_sheet_name] if history_sheet_name in wb.sheetnames else wb.create_sheet(history_sheet_name)
     else:
         wb = Workbook()
         sheet = wb.active
-        sheet.title = "History"
+        sheet.title = history_sheet_name
+    if sheet.max_row == 1 and sheet.cell(1, 1).value is None:
         sheet.append([
-            "Date/time", "Source report", "Unique AI users",
+            "Date/time", "Source report",
+            "Unique licensed users" if full_license_report else "Unique AI users",
             "Monthly cost (EUR)", "12-month projection (EUR)", "Average cost/user (EUR)",
             "Costcenter data updated",
+            "Users without any license" if full_license_report else "Users without AI license",
         ])
-    if sheet.cell(1, 7).value != "Costcenter data updated":
-        sheet.cell(1, 7).value = "Costcenter data updated"
+    sheet.cell(1, 7).value = "Costcenter data updated"
+    sheet.cell(1, 8).value = "Users without any license" if full_license_report else "Users without AI license"
     total_cost = sum(row["cost"] or 0 for row in summary)
     sheet.append([
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -432,6 +472,7 @@ def append_history(source: Path, summary, unique_users, member_updated):
         total_cost * 12,
         total_cost / len(unique_users) if unique_users else "n.a.",
         member_updated,
+        without_license_count,
     ])
     for cell in sheet[1]:
         cell.font = Font(bold=True, color="FFFFFF")
@@ -446,7 +487,8 @@ def append_history(source: Path, summary, unique_users, member_updated):
     sheet.freeze_panes = "A2"
     wb.save(history_path)
 
-    product_sheet = wb["Product History"] if "Product History" in wb.sheetnames else wb.create_sheet("Product History")
+
+    product_sheet = wb[product_sheet_name] if product_sheet_name in wb.sheetnames else wb.create_sheet(product_sheet_name)
     if product_sheet.max_row == 1 and product_sheet.cell(1, 1).value is None:
         product_sheet.delete_rows(1, 1)
         product_sheet.append(["Date/time", "Product", "Unique users", "Monthly cost (EUR)"])
@@ -468,34 +510,141 @@ def append_history(source: Path, summary, unique_users, member_updated):
     wb.save(history_path)
 
 
+def add_history_charts(workbook):
+    """Add a compact overview and daily trends to an exported history workbook."""
+    for sheet_name in ("Overview", "Trends", "Charts & Trends"):
+        if sheet_name in workbook.sheetnames:
+            del workbook[sheet_name]
+    history = workbook["History"]
+    if history.max_row < 2:
+        return
+
+    records = []
+    for row in history.iter_rows(min_row=2, values_only=True):
+        values = list(row) + [None] * 8
+        records.append(values[:8])
+    latest_by_day = {}
+    for row in records:
+        timestamp = str(row[0] or "")
+        latest_by_day[timestamp[:10]] = row
+    daily_rows = [latest_by_day[key] for key in sorted(latest_by_day)]
+
+    overview = workbook.create_sheet("Overview", 0)
+    overview["A1"] = "T-Digital AI Cost Calculator"
+    overview["A2"] = "History overview"
+    overview.append([])
+    overview.append(["Metric", "Latest value"])
+    latest = daily_rows[-1]
+    metrics = [
+        ("Latest execution", latest[0]),
+        ("Source report", latest[1]),
+        ("Unique AI users", latest[2]),
+        ("Monthly cost (EUR)", latest[3]),
+        ("Average cost/user (EUR)", latest[5]),
+        ("12-month projection (EUR)", latest[4]),
+        ("Users without AI license", latest[7]),
+        ("Tracked days", len(daily_rows)),
+    ]
+    for metric, value in metrics:
+        overview.append([metric, value])
+    for cell in overview[4]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="E20074")
+    overview.column_dimensions["A"].width = 32
+    overview.column_dimensions["B"].width = 28
+    for row_number in (8, 9, 10):
+        overview.cell(row_number, 2).number_format = '€#,##0.00'
+    overview.freeze_panes = "A5"
+
+    trends = workbook.create_sheet("Trends", 1)
+    trends["A1"] = "Daily trends"
+    trends["A2"] = "One point per day: the last saved execution of that day."
+    trends.append([])
+    trends.append(["Date", "Monthly cost (EUR)", "Unique AI users", "Users without AI license"])
+    for row in daily_rows:
+        trends.append([row[0], row[3], row[2], row[7]])
+    for cell in trends[4]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="E20074")
+    for column, width in {"A": 20, "B": 22, "C": 18, "D": 25}.items():
+        trends.column_dimensions[column].width = width
+    trends.freeze_panes = "A5"
+
+    def line_chart(title, min_col, max_col, position, y_title):
+        chart = LineChart()
+        chart.title = title
+        chart.y_axis.title = y_title
+        chart.x_axis.title = "Date"
+        chart.height = 7
+        chart.width = 16
+        data = Reference(trends, min_col=min_col, max_col=max_col, min_row=4, max_row=trends.max_row)
+        categories = Reference(trends, min_col=1, min_row=5, max_row=trends.max_row)
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(categories)
+        trends.add_chart(chart, position)
+
+    line_chart("Monthly cost", 2, 2, "F4", "EUR")
+    line_chart("AI users and users without license", 3, 4, "F20", "Users")
+
+
 def show_history(root):
     window = tk.Toplevel(root)
     window.title("AI Cost Calculator - History")
-    window.geometry("1000x430")
+    window.geometry("1160x560")
+    window.minsize(800, 400)
+    window.transient(root)
+    window.columnconfigure(0, weight=1)
+    window.rowconfigure(1, weight=1)
     history_path = history_file()
     if not history_path.exists():
-        ttk.Label(window, text="No history available yet.", padding=30).pack()
+        ttk.Label(window, text="No history available yet.", padding=30).grid(
+            row=0, column=0, sticky="nsew"
+        )
         return
 
-    sheet = load_workbook(history_path, data_only=True, read_only=True).active
-    rows = list(sheet.iter_rows(values_only=True))
-    if not rows:
-        ttk.Label(window, text="No history available yet.", padding=30).pack()
-        return
-    columns = ["date", "source", "users", "cost", "projection", "average", "members"]
-    tree = ttk.Treeview(window, columns=columns, show="headings")
-    headings = ["Date/time", "Source report", "Unique AI users", "Monthly cost (EUR)", "12-month projection (EUR)", "Average/user (EUR)", "Costcenter data updated"]
-    widths = [155, 240, 110, 130, 170, 130, 160]
-    for key, heading, width in zip(columns, headings, widths):
-        tree.heading(key, text=heading)
-        tree.column(key, width=width, anchor="w")
-    for row in rows[1:]:
-        values = list(row) + [""] * 7
-        tree.insert("", "end", values=values[:7])
-    tree.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=12)
-    scrollbar = ttk.Scrollbar(window, orient="vertical", command=tree.yview)
-    scrollbar.pack(side="right", fill="y", padx=(0, 12), pady=12)
-    tree.configure(yscrollcommand=scrollbar.set)
+    workbook = load_workbook(history_path, data_only=True, read_only=True)
+    notebook = ttk.Notebook(window)
+    notebook.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=12, pady=(10, 0))
+
+    def build_history_tab(sheet_name, title, headings):
+        tab = ttk.Frame(notebook, padding=8)
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+        notebook.add(tab, text=title)
+        sheet = workbook[sheet_name] if sheet_name in workbook.sheetnames else None
+        rows = list(sheet.iter_rows(values_only=True)) if sheet else []
+        ttk.Label(tab, text=f"{max(0, len(rows) - 1)} saved calculations").grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        if not rows:
+            ttk.Label(tab, text="No history available yet.", padding=30).grid(
+                row=1, column=0, sticky="nsew"
+            )
+            return
+        columns = [f"column_{index}" for index in range(len(headings))]
+        table_frame = ttk.Frame(tab)
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
+        widths = [155, 260, 135, 150, 175, 150, 205, 175]
+        for index, (key, heading) in enumerate(zip(columns, headings)):
+            tree.heading(key, text=heading)
+            anchor = "center" if index in {2, 3, 4, 5, 7} else "w"
+            tree.column(key, width=widths[index], minwidth=90, anchor=anchor, stretch=False)
+        for row in rows[1:]:
+            values = list(row) + [""] * len(headings)
+            tree.insert("", "end", values=values[:len(headings)])
+        vertical_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        horizontal_scrollbar = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vertical_scrollbar.set, xscrollcommand=horizontal_scrollbar.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vertical_scrollbar.grid(row=0, column=1, sticky="ns")
+        horizontal_scrollbar.grid(row=1, column=0, sticky="ew")
+
+    headings = ["Date/time", "Source report", "Unique users", "Monthly cost (EUR)", "12-month projection (EUR)", "Average/user (EUR)", "Costcenter data updated", "Users without license"]
+    build_history_tab("History", "AI History", headings)
+    build_history_tab("Full License History", "Full License History", headings)
 
     def export_history():
         destination = filedialog.asksaveasfilename(
@@ -508,10 +657,19 @@ def show_history(root):
         )
         if destination:
             shutil.copy2(history_path, destination)
+            exported = load_workbook(destination)
+            add_history_charts(exported)
+            exported.save(destination)
             messagebox.showinfo("History exported", f"Saved to:\n{destination}", parent=window)
 
-    ttk.Button(window, text="Export History", command=export_history).pack(
-        side="bottom", pady=(0, 12)
+    button_bar = ttk.Frame(window, padding=(12, 8, 12, 12))
+    button_bar.grid(row=2, column=0, sticky="ew")
+    button_bar.columnconfigure(0, weight=1)
+    ttk.Button(button_bar, text="Export History", command=export_history).grid(
+        row=0, column=1, padx=(6, 0)
+    )
+    ttk.Button(button_bar, text="Close", command=window.destroy).grid(
+        row=0, column=2, padx=(6, 0)
     )
 
 
@@ -620,96 +778,107 @@ def ask_for_emails(root):
 def manage_licenses(root):
     window = tk.Toplevel(root)
     window.title("License Settings")
-    window.geometry("700x430")
+    window.geometry("780x500")
+    window.minsize(650, 400)
     window.transient(root)
     window.grab_set()
     ttk.Label(
         window,
-        text="Add licences, change prices, or deactivate licences for future calculations.",
+        text="Manage AI and non-AI licenses used by future calculations.",
     ).pack(anchor="w", padx=16, pady=(16, 8))
-    columns = ("license", "price", "status")
-    table = ttk.Treeview(window, columns=columns, show="headings", height=13)
-    table.heading("license", text="License")
-    table.heading("price", text="Price / user / month (€)")
-    table.heading("status", text="Status")
-    table.column("license", width=390)
-    table.column("price", width=150, anchor="e")
-    table.column("status", width=100, anchor="center")
-    table.pack(fill="both", expand=True, padx=16, pady=4)
 
-    def refresh():
-        for item in table.get_children():
-            table.delete(item)
-        for name in sorted(PRODUCT_PRICES, key=str.casefold):
-            _, price = PRODUCT_PRICES[name]
-            status = "Active" if LICENSE_ACTIVE.get(name, True) else "Inactive"
-            table.insert("", tk.END, iid=name, values=(name, f"€{price:,.2f}", status))
+    notebook = ttk.Notebook(window)
+    notebook.pack(fill="both", expand=True, padx=16, pady=4)
 
-    def selected_name():
-        selected = table.selection()
-        return selected[0] if selected else None
+    def build_tab(title, catalog, active_map):
+        tab = ttk.Frame(notebook, padding=8)
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(0, weight=1)
+        notebook.add(tab, text=title)
+        columns = ("license", "price", "status")
+        table = ttk.Treeview(tab, columns=columns, show="headings", height=13)
+        table.heading("license", text="License")
+        table.heading("price", text="Price / user / month (€)")
+        table.heading("status", text="Status")
+        table.column("license", width=420)
+        table.column("price", width=170, anchor="e")
+        table.column("status", width=110, anchor="center")
+        scrollbar = ttk.Scrollbar(tab, orient="vertical", command=table.yview)
+        table.configure(yscrollcommand=scrollbar.set)
+        table.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
 
-    def add_license():
-        name = simpledialog.askstring("Add license", "License name:", parent=window)
-        if not name:
-            return
-        name = name.strip()
-        if name in PRODUCT_PRICES:
-            messagebox.showerror("License exists", "A license with this name already exists.", parent=window)
-            return
-        price = simpledialog.askfloat("Add license", "Monthly price per user (€):", parent=window, minvalue=0)
-        if price is None:
-            return
-        PRODUCT_PRICES[name] = (name, price)
-        LICENSE_ACTIVE[name] = True
-        save_license_settings()
+        def refresh():
+            for item in table.get_children():
+                table.delete(item)
+            for name in sorted(catalog, key=str.casefold):
+                _, price = catalog[name]
+                status = "Active" if active_map.get(name, True) else "Inactive"
+                table.insert("", tk.END, iid=name, values=(name, f"€{price:,.2f}", status))
+
+        def selected_name():
+            selected = table.selection()
+            return selected[0] if selected else None
+
+        def add_license():
+            name = simpledialog.askstring("Add license", "License name:", parent=window)
+            if not name:
+                return
+            name = name.strip()
+            if name in PRODUCT_PRICES or name in NON_AI_PRODUCT_PRICES:
+                messagebox.showerror("License exists", "A license with this name already exists.", parent=window)
+                return
+            price = simpledialog.askfloat("Add license", "Monthly price per user (€):", parent=window, minvalue=0)
+            if price is None:
+                return
+            catalog[name] = (name, price)
+            active_map[name] = True
+            save_license_settings()
+            refresh()
+
+        def edit_license():
+            name = selected_name()
+            if not name:
+                messagebox.showinfo("Select license", "Select a license first.", parent=window)
+                return
+            _, old_price = catalog[name]
+            price = simpledialog.askfloat(
+                "Change license price", f"Monthly price for {name} (€):",
+                initialvalue=old_price, minvalue=0, parent=window,
+            )
+            if price is not None:
+                product, _ = catalog[name]
+                catalog[name] = (product, price)
+                save_license_settings()
+                refresh()
+
+        def toggle_license():
+            name = selected_name()
+            if not name:
+                messagebox.showinfo("Select license", "Select a license first.", parent=window)
+                return
+            active = active_map.get(name, True)
+            action = "deactivate" if active else "reactivate"
+            if not messagebox.askyesno(
+                f"{action.title()} license",
+                f"{action.title()} '{name}' for future calculations?\n\n"
+                "Old exports and history will not be changed.", parent=window,
+            ):
+                return
+            active_map[name] = not active
+            save_license_settings()
+            refresh()
+
+        buttons = ttk.Frame(tab)
+        buttons.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(buttons, text="Add License", command=add_license).pack(side="left", padx=(0, 6))
+        ttk.Button(buttons, text="Change Price", command=edit_license).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Deactivate / Reactivate", command=toggle_license).pack(side="left", padx=6)
         refresh()
 
-    def edit_license():
-        name = selected_name()
-        if not name:
-            messagebox.showinfo("Select license", "Select a license first.", parent=window)
-            return
-        _, old_price = PRODUCT_PRICES[name]
-        price = simpledialog.askfloat(
-            "Change license price",
-            f"Monthly price for {name} (€):",
-            initialvalue=old_price,
-            minvalue=0,
-            parent=window,
-        )
-        if price is None:
-            return
-        product, _ = PRODUCT_PRICES[name]
-        PRODUCT_PRICES[name] = (product, price)
-        save_license_settings()
-        refresh()
-
-    def toggle_license():
-        name = selected_name()
-        if not name:
-            messagebox.showinfo("Select license", "Select a license first.", parent=window)
-            return
-        active = LICENSE_ACTIVE.get(name, True)
-        action = "deactivate" if active else "reactivate"
-        if not messagebox.askyesno(
-            f"{action.title()} license",
-            f"{action.title()} '{name}' for future calculations?\n\n"
-            "Old exports and history will not be changed.",
-            parent=window,
-        ):
-            return
-        LICENSE_ACTIVE[name] = not active
-        save_license_settings()
-        refresh()
-
-    buttons = ttk.Frame(window)
-    buttons.pack(fill="x", padx=16, pady=(6, 14))
-    ttk.Button(buttons, text="Add License", command=add_license).pack(side="left", padx=(0, 6))
-    ttk.Button(buttons, text="Change Price", command=edit_license).pack(side="left", padx=6)
-    ttk.Button(buttons, text="Deactivate / Reactivate", command=toggle_license).pack(side="left", padx=6)
-    ttk.Button(buttons, text="Close", command=window.destroy).pack(side="right")
-    refresh()
+    build_tab("AI Licenses", PRODUCT_PRICES, LICENSE_ACTIVE)
+    build_tab("Non-AI Licenses", NON_AI_PRODUCT_PRICES, NON_AI_LICENSE_ACTIVE)
+    ttk.Button(window, text="Close", command=window.destroy).pack(anchor="e", padx=16, pady=(6, 14))
     root.wait_window(window)
 
 
@@ -1013,7 +1182,7 @@ def main():
                     user_costs, without_license,
                     user_licenses,
                 )
-                append_history(source, summary, unique_users, member_updated)
+                append_history(source, summary, unique_users, len(without_license), member_updated)
                 total_cost = sum(row["cost"] or 0 for row in summary)
                 average = total_cost / len(unique_users) if unique_users else 0
                 messagebox.showinfo(
@@ -1027,6 +1196,51 @@ def main():
                 )
         except Exception as exc:
             messagebox.showerror("Could not process report", str(exc), parent=root)
+
+    def run_full_license_export():
+        source = get_source_report()
+        if not source:
+            return
+        try:
+            if not current_members and not update_members():
+                return
+            services = read_report(source)
+            summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
+                services, current_members, include_non_ai=True
+            )
+            if not detail:
+                raise ValueError("No configured licenses were found in the report.")
+            default_name = f"Full_License_Report_{datetime.now():%Y%m%d_%H%M}.xlsx"
+            destination_name = filedialog.asksaveasfilename(
+                parent=root,
+                title="Save full license report",
+                initialdir=str(export_directory()),
+                initialfile=default_name,
+                defaultextension=".xlsx",
+                filetypes=[("Excel files", "*.xlsx")],
+            )
+            if destination_name:
+                export_report(
+                    Path(destination_name), source, summary, detail, unique_users,
+                    user_costs, without_license, user_licenses,
+                    full_license_report=True,
+                )
+                append_history(
+                    source, summary, unique_users, len(without_license), member_updated,
+                    history_sheet_name="Full License History",
+                    product_sheet_name="Full Product History",
+                    full_license_report=True,
+                )
+                messagebox.showinfo(
+                    "Full license export complete",
+                    f"Saved to:\n{destination_name}\n\n"
+                    f"Unique licensed users: {len(unique_users)}\n"
+                    f"Monthly cost: €{sum(row['cost'] or 0 for row in summary):,.2f}\n"
+                    f"Users without any license: {len(without_license)}",
+                    parent=root,
+                )
+        except Exception as exc:
+            messagebox.showerror("Could not export full license report", str(exc), parent=root)
 
     def run_costcenter_export():
         nonlocal current_members, member_updated
@@ -1298,6 +1512,7 @@ def main():
     ttk.Button(exports, text="Export by Cost Center Manager", style="Telekom.TButton", command=run_manager_export).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Button(exports, text="Export by Licenses", style="Telekom.TButton", command=run_license_export).grid(row=3, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Button(exports, text="Export Users with Multiple Chargeable Licenses", style="Telekom.TButton", command=run_multiple_license_export).grid(row=4, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export Full License Report", style="Telekom.TButton", command=run_full_license_export).grid(row=5, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Label(content, text="DATA & HISTORY", style="Telekom.TLabel", font=("Arial", 10, "bold")).pack(anchor="w", padx=34, pady=(12, 2))
     data_frame = ttk.Frame(content)
     data_frame.pack(fill="x", padx=34)
