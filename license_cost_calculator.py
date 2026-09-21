@@ -46,6 +46,7 @@ PRODUCT_PRICES = {
 NON_AI_PRODUCT_PRICES = {
     "Bitwarden": ("Bitwarden", 0.60),
     "Miro Enterprise License": ("Miro Enterprise", 9.00),
+    "Global Secure Access for LMD": ("Global Secure Access for LMD", 5.10),
 }
 DEFAULT_PRODUCT_PRICES = dict(PRODUCT_PRICES)
 LICENSE_ACTIVE = {name: True for name in PRODUCT_PRICES}
