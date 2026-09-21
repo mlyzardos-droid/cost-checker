@@ -1205,7 +1205,6 @@ def main():
         source = get_source_report()
         if not source:
             return
-        full_license_report = choose_export_scope(root, "Export selected users by email")
         try:
             if not current_members and not update_members():
                 return
@@ -1249,6 +1248,7 @@ def main():
         source = get_source_report()
         if not source:
             return
+        full_license_report = choose_export_scope(root, "Export selected users by email")
         try:
             if not current_members and not update_members():
                 return
