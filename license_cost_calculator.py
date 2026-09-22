@@ -873,6 +873,38 @@ def choose_position_title(root, hr_records):
     return result["value"]
 
 
+def choose_supervisor(root, hr_records):
+    supervisors = sorted(
+        {record.get("supervisor_mail", "") for record in hr_records.values() if record.get("supervisor_mail")},
+        key=str.casefold,
+    )
+    if not supervisors:
+        messagebox.showerror(
+            "No supervisors",
+            "No supervisor mail addresses were found in the saved HR report.",
+            parent=root,
+        )
+        return None
+    window = tk.Toplevel(root)
+    window.title("Select Supervisor")
+    window.geometry("620x150")
+    window.transient(root)
+    window.grab_set()
+    selected = tk.StringVar(value=supervisors[0])
+    ttk.Label(window, text="Supervisor mail:").pack(pady=(20, 6))
+    combo = ttk.Combobox(window, textvariable=selected, values=supervisors, state="readonly", width=58)
+    combo.pack()
+    result = {"value": None}
+
+    def confirm():
+        result["value"] = selected.get()
+        window.destroy()
+
+    ttk.Button(window, text="Continue", command=confirm).pack(pady=14)
+    root.wait_window(window)
+    return result["value"]
+
+
 def choose_licenses(root, services, include_non_ai=False):
     allowed = active_license_names()
     if include_non_ai:
@@ -1615,6 +1647,68 @@ def main():
         except Exception as exc:
             messagebox.showerror("Could not export position title", str(exc), parent=root)
 
+    def run_supervisor_export():
+        nonlocal current_members, member_updated
+        if not current_members and not update_members():
+            return
+        source = get_source_report()
+        if not source:
+            return
+        supervisor = choose_supervisor(root, current_hr)
+        if not supervisor:
+            return
+        full_license_report = choose_export_scope(root, f"Export for supervisor: {supervisor}")
+        try:
+            selected_accounts = {
+                key for key, member in current_members.items()
+                if current_hr.get(member.get("email", "").casefold(), {}).get("supervisor_mail", "").casefold() == supervisor.casefold()
+            }
+            selected_members = {key: current_members[key] for key in selected_accounts}
+            services = read_report(source)
+            selected_services = []
+            for item in services:
+                users = [
+                    u for u in item["users"]
+                    if (u["account"] or u["username"]).casefold() in selected_accounts
+                ]
+                if users:
+                    selected_item = dict(item)
+                    selected_item["users"] = users
+                    selected_item["reported_total"] = len(users)
+                    selected_services.append(selected_item)
+            summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
+                selected_services, selected_members, include_non_ai=full_license_report,
+                hr_records=current_hr
+            )
+            if not detail:
+                raise ValueError(f"No AI licences found for supervisor {supervisor}.")
+            safe_supervisor = "_".join(supervisor.split("@"))[0:60].replace(".", "_")
+            prefix = "Full_License_Report_Supervisor" if full_license_report else "AI_License_Cost_Supervisor"
+            default_name = f"{prefix}_{safe_supervisor}_{datetime.now():%Y%m%d_%H%M}.xlsx"
+            destination_name = filedialog.asksaveasfilename(
+                parent=root,
+                title="Save supervisor export",
+                initialdir=str(export_directory()),
+                initialfile=default_name,
+                defaultextension=".xlsx",
+                filetypes=[("Excel files", "*.xlsx")],
+            )
+            if destination_name:
+                export_report(
+                    Path(destination_name), source, summary, detail,
+                    unique_users, user_costs, without_license, user_licenses,
+                    full_license_report=full_license_report,
+                )
+                messagebox.showinfo(
+                    "Supervisor export complete",
+                    f"Supervisor: {supervisor}\n"
+                    f"Users with AI license: {len(unique_users)}\n"
+                    f"Saved to:\n{destination_name}",
+                    parent=root,
+                )
+        except Exception as exc:
+            messagebox.showerror("Could not export supervisor", str(exc), parent=root)
+
     def run_email_export():
         nonlocal current_members, member_updated
         if not current_members and not update_members():
@@ -1786,9 +1880,10 @@ def main():
     ttk.Button(exports, text="Export by User Emails", style="Telekom.TButton", command=run_email_export).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
     ttk.Button(exports, text="Export by Cost Center Manager", style="Telekom.TButton", command=run_manager_export).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Button(exports, text="Export by Position Title", style="Telekom.TButton", command=run_position_export).grid(row=3, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export by Licenses", style="Telekom.TButton", command=run_license_export).grid(row=4, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export Users with Multiple Chargeable Licenses", style="Telekom.TButton", command=run_multiple_license_export).grid(row=5, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export Full License Report", style="Telekom.TButton", command=run_full_license_export).grid(row=6, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export by Supervisor", style="Telekom.TButton", command=run_supervisor_export).grid(row=4, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export by Licenses", style="Telekom.TButton", command=run_license_export).grid(row=5, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export Users with Multiple Chargeable Licenses", style="Telekom.TButton", command=run_multiple_license_export).grid(row=6, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export Full License Report", style="Telekom.TButton", command=run_full_license_export).grid(row=7, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Label(content, text="DATA & HISTORY", style="Telekom.TLabel", font=("Arial", 10, "bold")).pack(anchor="w", padx=34, pady=(12, 2))
     data_frame = ttk.Frame(content)
     data_frame.pack(fill="x", padx=34)
