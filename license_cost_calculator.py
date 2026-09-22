@@ -79,6 +79,12 @@ def members_file() -> Path:
     return folder / "costcenter_members.json"
 
 
+def hr_file() -> Path:
+    folder = export_directory() / "history"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / "hr_records.json"
+
+
 def license_settings_file() -> Path:
     folder = export_directory() / "history"
     folder.mkdir(parents=True, exist_ok=True)
@@ -159,6 +165,26 @@ def save_members(members):
     return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
 
 
+def load_saved_hr():
+    path = hr_file()
+    if not path.exists():
+        return {}, "Not configured"
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            records = json.load(file)
+        updated = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        return records, updated
+    except (OSError, json.JSONDecodeError):
+        return {}, "Not configured"
+
+
+def save_hr(records):
+    path = hr_file()
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(records, file, ensure_ascii=False, indent=2)
+    return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+
+
 def clean(value) -> str:
     return str(value).strip() if value is not None else ""
 
@@ -224,8 +250,29 @@ def read_costcenter_report(source: Path):
     return members
 
 
-def calculate(services, members=None, include_non_ai=False):
+def read_hr_report(source: Path):
+    workbook = load_workbook(source, data_only=True, read_only=True)
+    sheet = workbook.active
+    rows = list(sheet.iter_rows(values_only=True))
+    records = {}
+    for row in rows[2:]:
+        row = list(row) + [None] * 16
+        email = clean(row[5]).casefold()
+        if not email:
+            continue
+        records[email] = {
+            "email": clean(row[5]),
+            "position_title": clean(row[10]),
+            "supervisor_mail": clean(row[13]),
+            "department": clean(row[6]),
+            "unit": clean(row[7]),
+        }
+    return records
+
+
+def calculate(services, members=None, include_non_ai=False, hr_records=None):
     members = members or {}
+    hr_records = hr_records or {}
     catalog = dict(PRODUCT_PRICES)
     active_names = active_license_names()
     if include_non_ai:
@@ -276,6 +323,7 @@ def calculate(services, members=None, include_non_ai=False):
                 "costcenter": "", "manager": "", "licenses": 0, "cost": 0.0,
                 "products": set(), "license_names": set(),
                 "ai_license_names": set(), "non_ai_license_names": set(),
+                "position_title": "", "supervisor_mail": "",
                 "chargeable_licenses": 0,
                 "ai_licenses": 0, "ai_cost": 0.0,
                 "non_ai_licenses": 0, "non_ai_cost": 0.0,
@@ -285,6 +333,9 @@ def calculate(services, members=None, include_non_ai=False):
             record["email"] = member.get("email", "")
             record["costcenter"] = member.get("costcenter", "")
             record["manager"] = member.get("manager", "")
+            hr_record = hr_records.get(record["email"].casefold(), {})
+            record["position_title"] = hr_record.get("position_title", "")
+            record["supervisor_mail"] = hr_record.get("supervisor_mail", "")
             record["licenses"] += 1
             record["products"].add(product)
             record["license_names"].add(item["service"])
@@ -308,6 +359,8 @@ def calculate(services, members=None, include_non_ai=False):
                 "email": record["email"],
                 "costcenter": record["costcenter"],
                 "manager": record["manager"],
+                "position_title": record["position_title"],
+                "supervisor_mail": record["supervisor_mail"],
                 "product": product,
                 "service": item["service"],
                 "price": price,
@@ -442,15 +495,17 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     if full_license_report:
         user_cost_sheet.append([
             "Account", "Name", "Email", "Cost center", "Cost center manager",
-            "AI licences (count)", "AI license names", "AI monthly cost (EUR)",
-            "Non-AI licences (count)", "Non-AI license names", "Non-AI monthly cost (EUR)",
-            "Total licences", "All license names", "Total monthly cost (EUR)",
+            "Position title", "Supervisor mail", "AI licences (count)",
+            "AI license names", "AI monthly cost (EUR)", "Non-AI licences (count)",
+            "Non-AI license names", "Non-AI monthly cost (EUR)", "Total licences",
+            "All license names", "Total monthly cost (EUR)",
             "12-month projection (EUR)",
         ])
         for user in user_costs:
             user_cost_sheet.append([
                 user["account"], user["name"], user["email"], user["costcenter"],
-                user["manager"], user["ai_licenses"],
+                user["manager"], user["position_title"], user["supervisor_mail"],
+                user["ai_licenses"],
                 "; ".join(sorted(user["ai_license_names"])), user["ai_cost"],
                 user["non_ai_licenses"],
                 "; ".join(sorted(user["non_ai_license_names"])), user["non_ai_cost"],
@@ -460,17 +515,18 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
     else:
         user_cost_sheet.append([
             "Account", "Name", "Email", "Cost center", "Cost center manager",
-            "Licenses assigned", "AI licences", "Monthly cost (EUR)",
+            "Position title", "Supervisor mail", "License names", "License count", "Monthly cost (EUR)",
             "Chargeable licences", "12-month projection (EUR)",
         ])
         for user in user_costs:
             user_cost_sheet.append([
                 user["account"], user["name"], user["email"], user["costcenter"],
-                user["manager"], "; ".join(sorted(user["products"])), user["licenses"],
+                user["manager"], user["position_title"], user["supervisor_mail"],
+                "; ".join(sorted(user["products"])), user["licenses"],
                 user["cost"], user["chargeable_licenses"], user["cost"] * 12,
             ])
     style_sheet(user_cost_sheet)
-    money_columns = (8, 11, 14, 15) if full_license_report else (8, 10)
+    money_columns = (10, 13, 16, 17) if full_license_report else (10, 12)
     for row in user_cost_sheet.iter_rows(min_row=2, min_col=1, max_col=user_cost_sheet.max_column):
         for cell in row:
             if cell.column in money_columns and isinstance(cell.value, (int, float)):
@@ -773,6 +829,38 @@ def choose_manager(root, members):
     selected = tk.StringVar(value=managers[0])
     ttk.Label(window, text="Cost center manager:").pack(pady=(20, 6))
     combo = ttk.Combobox(window, textvariable=selected, values=managers, state="readonly", width=45)
+    combo.pack()
+    result = {"value": None}
+
+    def confirm():
+        result["value"] = selected.get()
+        window.destroy()
+
+    ttk.Button(window, text="Continue", command=confirm).pack(pady=14)
+    root.wait_window(window)
+    return result["value"]
+
+
+def choose_position_title(root, hr_records):
+    positions = sorted(
+        {record.get("position_title", "") for record in hr_records.values() if record.get("position_title")},
+        key=str.casefold,
+    )
+    if not positions:
+        messagebox.showerror(
+            "No position titles",
+            "No position titles were found in the saved HR report.",
+            parent=root,
+        )
+        return None
+    window = tk.Toplevel(root)
+    window.title("Select Position Title")
+    window.geometry("620x150")
+    window.transient(root)
+    window.grab_set()
+    selected = tk.StringVar(value=positions[0])
+    ttk.Label(window, text="Position title:").pack(pady=(20, 6))
+    combo = ttk.Combobox(window, textvariable=selected, values=positions, state="readonly", width=58)
     combo.pack()
     result = {"value": None}
 
@@ -1149,6 +1237,9 @@ def main():
     current_members, member_updated = load_saved_members()
     status_var = tk.StringVar(value=f"Costcenter data: {member_updated}")
     ttk.Label(content, textvariable=status_var, foreground="#555555").pack(pady=(0, 12))
+    current_hr, hr_updated = load_saved_hr()
+    hr_status_var = tk.StringVar(value=f"HR data: {hr_updated}")
+    ttk.Label(content, textvariable=hr_status_var, foreground="#555555").pack(pady=(0, 12))
     current_source = None
     source_status_var = tk.StringVar(value="AD report: Not selected")
     ttk.Label(content, textvariable=source_status_var, foreground="#555555").pack(pady=(0, 12))
@@ -1193,6 +1284,30 @@ def main():
         )
         if not member_name:
             return False
+
+    def update_hr_report():
+        nonlocal current_hr, hr_updated
+        report_name = filedialog.askopenfilename(
+            parent=root,
+            title="Select HR Report",
+            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")],
+        )
+        if not report_name:
+            return False
+        try:
+            current_hr = read_hr_report(Path(report_name))
+            hr_updated = save_hr(current_hr)
+            hr_status_var.set(f"HR data: {hr_updated}")
+            messagebox.showinfo(
+                "HR data updated",
+                f"Saved {len(current_hr)} HR users.\n\n"
+                "This report will be used automatically for future calculations.",
+                parent=root,
+            )
+            return True
+        except Exception as exc:
+            messagebox.showerror("Could not update HR data", str(exc), parent=root)
+            return False
         try:
             current_members = read_costcenter_report(Path(member_name))
             member_updated = save_members(current_members)
@@ -1234,7 +1349,9 @@ def main():
             if not current_members and not update_members():
                 return
             services = read_report(source)
-            summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(services, current_members)
+            summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
+                services, current_members, hr_records=current_hr
+            )
             if not detail:
                 raise ValueError("No matching AI services were found.")
             update_preview(summary, unique_users, without_license)
@@ -1278,7 +1395,7 @@ def main():
                 return
             services = read_report(source)
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
-                services, current_members, include_non_ai=True
+                services, current_members, include_non_ai=True, hr_records=current_hr
             )
             if not detail:
                 raise ValueError("No configured licenses were found in the report.")
@@ -1341,7 +1458,8 @@ def main():
                     selected_item["reported_total"] = len(users)
                     selected_services.append(selected_item)
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
-                selected_services, selected_members, include_non_ai=full_license_report
+                selected_services, selected_members, include_non_ai=full_license_report,
+                hr_records=current_hr
             )
             if not detail:
                 raise ValueError(f"No AI licences found for cost center {costcenter}.")
@@ -1402,7 +1520,8 @@ def main():
                     selected_item["reported_total"] = len(users)
                     selected_services.append(selected_item)
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
-                selected_services, selected_members, include_non_ai=full_license_report
+                selected_services, selected_members, include_non_ai=full_license_report,
+                hr_records=current_hr
             )
             if not detail:
                 raise ValueError(f"No AI licences found for manager {manager}.")
@@ -1434,6 +1553,68 @@ def main():
         except Exception as exc:
             messagebox.showerror("Could not export manager", str(exc), parent=root)
 
+    def run_position_export():
+        nonlocal current_members, member_updated
+        if not current_members and not update_members():
+            return
+        source = get_source_report()
+        if not source:
+            return
+        position = choose_position_title(root, current_hr)
+        if not position:
+            return
+        full_license_report = choose_export_scope(root, f"Export for position title: {position}")
+        try:
+            selected_accounts = {
+                key for key, member in current_members.items()
+                if current_hr.get(member.get("email", "").casefold(), {}).get("position_title") == position
+            }
+            selected_members = {key: current_members[key] for key in selected_accounts}
+            services = read_report(source)
+            selected_services = []
+            for item in services:
+                users = [
+                    u for u in item["users"]
+                    if (u["account"] or u["username"]).casefold() in selected_accounts
+                ]
+                if users:
+                    selected_item = dict(item)
+                    selected_item["users"] = users
+                    selected_item["reported_total"] = len(users)
+                    selected_services.append(selected_item)
+            summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
+                selected_services, selected_members, include_non_ai=full_license_report,
+                hr_records=current_hr
+            )
+            if not detail:
+                raise ValueError(f"No AI licences found for position title {position}.")
+            safe_position = "_".join(position.split())[:60]
+            prefix = "Full_License_Report_Position" if full_license_report else "AI_License_Cost_Position"
+            default_name = f"{prefix}_{safe_position}_{datetime.now():%Y%m%d_%H%M}.xlsx"
+            destination_name = filedialog.asksaveasfilename(
+                parent=root,
+                title="Save position title export",
+                initialdir=str(export_directory()),
+                initialfile=default_name,
+                defaultextension=".xlsx",
+                filetypes=[("Excel files", "*.xlsx")],
+            )
+            if destination_name:
+                export_report(
+                    Path(destination_name), source, summary, detail,
+                    unique_users, user_costs, without_license, user_licenses,
+                    full_license_report=full_license_report,
+                )
+                messagebox.showinfo(
+                    "Position title export complete",
+                    f"Position title: {position}\n"
+                    f"Users with AI license: {len(unique_users)}\n"
+                    f"Saved to:\n{destination_name}",
+                    parent=root,
+                )
+        except Exception as exc:
+            messagebox.showerror("Could not export position title", str(exc), parent=root)
+
     def run_email_export():
         nonlocal current_members, member_updated
         if not current_members and not update_members():
@@ -1464,7 +1645,8 @@ def main():
                     selected_item["reported_total"] = len(users)
                     selected_services.append(selected_item)
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
-                selected_services, selected_members, include_non_ai=full_license_report
+                selected_services, selected_members, include_non_ai=full_license_report,
+                hr_records=current_hr
             )
             prefix = "Full_License_Report_Selected_Users" if full_license_report else "AI_License_Cost_Selected_Users"
             default_name = f"{prefix}_{datetime.now():%Y%m%d_%H%M}.xlsx"
@@ -1506,7 +1688,8 @@ def main():
         try:
             services = read_report(source)
             _, _, _, all_user_costs, _, _ = calculate(
-                services, current_members, include_non_ai=full_license_report
+                services, current_members, include_non_ai=full_license_report,
+                hr_records=current_hr
             )
             selected_accounts = {
                 user["account"].casefold() for user in all_user_costs
@@ -1525,7 +1708,8 @@ def main():
                     selected_item["reported_total"] = len(users)
                     selected_services.append(selected_item)
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
-                selected_services, selected_members, include_non_ai=full_license_report
+                selected_services, selected_members, include_non_ai=full_license_report,
+                hr_records=current_hr
             )
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
@@ -1565,7 +1749,8 @@ def main():
                 return
             selected_services = [item for item in services if item["service"] in selected_names]
             summary, detail, unique_users, user_costs, without_license, user_licenses = calculate(
-                selected_services, current_members, include_non_ai=full_license_report
+                selected_services, current_members, include_non_ai=full_license_report,
+                hr_records=current_hr
             )
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
@@ -1600,9 +1785,10 @@ def main():
     ttk.Button(exports, text="Export Cost Center", style="Telekom.TButton", command=run_costcenter_export).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
     ttk.Button(exports, text="Export by User Emails", style="Telekom.TButton", command=run_email_export).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
     ttk.Button(exports, text="Export by Cost Center Manager", style="Telekom.TButton", command=run_manager_export).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export by Licenses", style="Telekom.TButton", command=run_license_export).grid(row=3, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export Users with Multiple Chargeable Licenses", style="Telekom.TButton", command=run_multiple_license_export).grid(row=4, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export Full License Report", style="Telekom.TButton", command=run_full_license_export).grid(row=5, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export by Position Title", style="Telekom.TButton", command=run_position_export).grid(row=3, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export by Licenses", style="Telekom.TButton", command=run_license_export).grid(row=4, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export Users with Multiple Chargeable Licenses", style="Telekom.TButton", command=run_multiple_license_export).grid(row=5, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export Full License Report", style="Telekom.TButton", command=run_full_license_export).grid(row=6, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Label(content, text="DATA & HISTORY", style="Telekom.TLabel", font=("Arial", 10, "bold")).pack(anchor="w", padx=34, pady=(12, 2))
     data_frame = ttk.Frame(content)
     data_frame.pack(fill="x", padx=34)
@@ -1611,7 +1797,8 @@ def main():
     ttk.Button(data_frame, text="Select / Change AD Report", style="Telekom.TButton", command=select_source_report).grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
     ttk.Button(data_frame, text="Update Costcenter Members", style="Telekom.TButton", command=update_members).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
     ttk.Button(data_frame, text="View History", style="Telekom.TButton", command=lambda: show_history(root)).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
-    ttk.Button(data_frame, text="License Settings", style="Telekom.TButton", command=lambda: manage_licenses(root)).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(data_frame, text="Update HR Report", style="Telekom.TButton", command=update_hr_report).grid(row=2, column=0, sticky="ew", padx=3, pady=3)
+    ttk.Button(data_frame, text="License Settings", style="Telekom.TButton", command=lambda: manage_licenses(root)).grid(row=2, column=1, sticky="ew", padx=3, pady=3)
     ttk.Button(content, text="Exit", style="Telekom.TButton", command=root.destroy).pack(fill="x", padx=37, pady=(16, 6))
     root.mainloop()
 
