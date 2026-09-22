@@ -12,7 +12,9 @@ from datetime import datetime
 import json
 from pathlib import Path
 import random
+import re
 import shutil
+import subprocess
 import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -65,6 +67,52 @@ def export_directory() -> Path:
             return candidate
     candidates[0].mkdir(parents=True, exist_ok=True)
     return candidates[0]
+
+
+def supervisor_export_directory(supervisor: str, full_license_report=False) -> Path:
+    """Return the AI-only or Full export folder for one supervisor."""
+    safe_supervisor = "_".join(supervisor.split("@"))[0:60].replace(".", "_")
+    safe_supervisor = re.sub(r"[^A-Za-z0-9_-]+", "_", safe_supervisor).strip("_")
+    report_scope = "Full" if full_license_report else "AI Only"
+    folder = export_directory() / safe_supervisor / report_scope
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def general_export_directory(full_license_report=False) -> Path:
+    """Return the shared AI-only or Full folder for general reports."""
+    folder = export_directory() / ("Full" if full_license_report else "AI Only")
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def custom_export_directory() -> Path:
+    """Return the shared folder for filtered/custom exports."""
+    folder = export_directory() / "Custom Reports"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def organize_existing_supervisor_exports() -> None:
+    """Move existing supervisor exports from the root into supervisor folders."""
+    root = export_directory()
+    prefixes = ("AI_License_Cost_Supervisor_", "Full_License_Report_Supervisor_")
+    for report in root.iterdir():
+        if not report.is_file() or report.name.startswith("~$"):
+            continue
+        matched_prefix = next((prefix for prefix in prefixes if report.stem.startswith(prefix)), None)
+        if not matched_prefix:
+            continue
+        supervisor_slug = report.stem[len(matched_prefix):]
+        supervisor_slug = re.sub(r"_\d{8}_\d{4}$", "", supervisor_slug).strip("_")
+        if not supervisor_slug:
+            continue
+        report_scope = "Full" if report.stem.startswith("Full_License_Report_Supervisor_") else "AI Only"
+        folder = root / supervisor_slug / report_scope
+        folder.mkdir(parents=True, exist_ok=True)
+        destination = folder / report.name
+        if not destination.exists():
+            shutil.move(str(report), str(destination))
 
 
 def history_file() -> Path:
@@ -406,7 +454,102 @@ def style_sheet(sheet):
         sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = width
 
 
-def export_report(destination: Path, source: Path, summary, detail, unique_users, user_costs, without_license, user_licenses, missing_emails=None, full_license_report=False):
+def add_average_cost_sheets(workbook, user_costs, full_license_report=False):
+    """Add management views with average monthly cost by HR dimensions."""
+    dimensions = [
+        ("Average Cost by Supervisor", "supervisor_mail"),
+        ("Average Cost by Role", "position_title"),
+        ("Average Cost by Cost Center", "costcenter"),
+    ]
+    for sheet_name, field in dimensions:
+        sheet = workbook.create_sheet(sheet_name)
+        sheet.append([
+            sheet_name.replace("Average Cost by ", ""),
+            "Licensed users", "Assigned licences", "Total monthly cost (EUR)",
+            "Average cost per user (EUR)", "12-month projection (EUR)",
+        ])
+        groups = defaultdict(lambda: {"users": 0, "licenses": 0, "cost": 0.0})
+        for user in user_costs:
+            licenses = user["licenses"] if full_license_report else user["ai_licenses"]
+            if licenses <= 0:
+                continue
+            group = clean(user.get(field)) or "(Not available)"
+            cost = user["cost"] if full_license_report else user["ai_cost"]
+            groups[group]["users"] += 1
+            groups[group]["licenses"] += licenses
+            groups[group]["cost"] += cost or 0
+        for group in sorted(groups, key=str.casefold):
+            values = groups[group]
+            average = values["cost"] / values["users"] if values["users"] else 0
+            sheet.append([
+                group, values["users"], values["licenses"], values["cost"],
+                average, values["cost"] * 12,
+            ])
+        style_sheet(sheet)
+        for row in sheet.iter_rows(min_row=2, min_col=4, max_col=6):
+            for cell in row:
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = '€#,##0.00'
+
+
+def offer_supervisor_email(root, destination, supervisor, full_license_report=False, recipient_role="supervisor"):
+    """Open a reviewable Microsoft Outlook draft with the selected export attached."""
+    if sys.platform != "darwin":
+        return
+    if not messagebox.askyesno(
+        f"Email {recipient_role} export",
+        f"Open an email draft to {supervisor} with this export attached?\n\n"
+        "The draft will open in Microsoft Outlook for review; it will not be sent automatically.",
+        parent=root,
+    ):
+        return
+    attachment_path = Path(destination).expanduser()
+    if not attachment_path.is_file():
+        messagebox.showerror(
+            "Attachment not found",
+            f"The exported file could not be found:\n{attachment_path}",
+            parent=root,
+        )
+        return
+    report_label = "full license report" if full_license_report else "AI license cost report"
+    subject = f"T-Digital {report_label.title()}"
+    communication_date = datetime.now().strftime("%d/%m/%Y")
+    body = (
+        "<p>Hello,</p>"
+        f"<p>Please find attached the {report_label} for the users assigned to you.</p>"
+        f"<p>Communication date: {communication_date}</p>"
+        "<p>Please review the assigned licenses and let us know if any changes are required.</p>"
+        "<p>Best regards,<br>T-Digital IT</p>"
+    )
+    def applescript_string(value):
+        return json.dumps(str(value), ensure_ascii=False)
+    script = (
+        f"set attachmentFile to (POSIX file {applescript_string(str(attachment_path))} as alias)\n"
+        f"set emailBody to {applescript_string(body)}\n"
+        "tell application \"Microsoft Outlook\"\n"
+        "set newMessage to make new outgoing message with properties "
+        f"{{subject:{applescript_string(subject)}, content:emailBody}}\n"
+        f"make new recipient at end of to recipients of newMessage with properties {{email address:{{address:{applescript_string(supervisor)}}}}}\n"
+        "make new attachment at end of newMessage with properties {file:attachmentFile}\n"
+        "open newMessage\n"
+        "activate\n"
+        "end tell"
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode:
+            details = (result.stderr or result.stdout or "Unknown Outlook error").strip()
+            raise RuntimeError(details)
+    except Exception as exc:
+        messagebox.showerror("Could not open Outlook draft", str(exc), parent=root)
+
+
+def export_report(destination: Path, source: Path, summary, detail, unique_users, user_costs, without_license, user_licenses, missing_emails=None, full_license_report=False, include_average_cost_sheets=False):
     wb = Workbook()
     overview = wb.active
     overview.title = "AI Cost Calculator"
@@ -550,6 +693,9 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
         for email in sorted(missing_emails):
             missing_sheet.append([email])
         style_sheet(missing_sheet)
+
+    if include_average_cost_sheets:
+        add_average_cost_sheets(wb, user_costs, full_license_report=full_license_report)
 
     wb.save(destination)
 
@@ -841,6 +987,19 @@ def choose_manager(root, members):
     return result["value"]
 
 
+def resolve_manager_email(manager, members):
+    """Find a manager email when the selected manager is also in the member report."""
+    manager_accounts = {
+        value.get("manager_account", "").casefold()
+        for value in members.values()
+        if value.get("manager", "") == manager and value.get("manager_account")
+    }
+    for value in members.values():
+        if value.get("account", "").casefold() in manager_accounts and value.get("email"):
+            return value["email"]
+    return ""
+
+
 def choose_position_title(root, hr_records):
     positions = sorted(
         {record.get("position_title", "") for record in hr_records.values() if record.get("position_title")},
@@ -957,14 +1116,30 @@ def ask_for_emails(root):
 
 
 def choose_export_scope(root, export_name):
-    """Ask whether a filtered export should contain AI licenses or all licenses."""
-    return messagebox.askyesno(
-        "Choose report type",
-        f"{export_name}\n\n"
-        "Yes = Full license report (AI + non-AI)\n"
-        "No = AI-only report",
-        parent=root,
-    )
+    """Let the user choose a clearly named AI or Full report."""
+    window = tk.Toplevel(root)
+    window.title("Choose Report Type")
+    window.geometry("480x180")
+    window.resizable(False, False)
+    window.transient(root)
+    window.grab_set()
+    ttk.Label(window, text=export_name, font=("Arial", 11, "bold")).pack(pady=(22, 6))
+    ttk.Label(window, text="Choose which report you want to create:").pack(pady=(0, 14))
+    buttons = ttk.Frame(window)
+    buttons.pack(fill="x", padx=28)
+    buttons.columnconfigure(0, weight=1)
+    buttons.columnconfigure(1, weight=1)
+    result = {"value": None}
+
+    def choose(value):
+        result["value"] = value
+        window.destroy()
+
+    ttk.Button(buttons, text="AI Report", command=lambda: choose(False)).grid(row=0, column=0, sticky="ew", padx=4)
+    ttk.Button(buttons, text="Full Report", command=lambda: choose(True)).grid(row=0, column=1, sticky="ew", padx=4)
+    window.protocol("WM_DELETE_WINDOW", window.destroy)
+    root.wait_window(window)
+    return result["value"]
 
 
 def manage_licenses(root):
@@ -1228,6 +1403,25 @@ def configure_windows_dpi():
 
 
 def main():
+    try:
+        organize_existing_supervisor_exports()
+        # Keep older supervisor exports in the same AI-only/Full structure.
+        root = export_directory()
+        for supervisor_folder in root.iterdir():
+            if not supervisor_folder.is_dir() or supervisor_folder.name == "history":
+                continue
+            for old_report in list(supervisor_folder.iterdir()):
+                if not old_report.is_file() or "Supervisor" not in old_report.name:
+                    continue
+                report_scope = "Full" if old_report.name.startswith("Full_License_Report_") else "AI Only"
+                target_folder = supervisor_folder / report_scope
+                target_folder.mkdir(parents=True, exist_ok=True)
+                target = target_folder / old_report.name
+                if not target.exists():
+                    shutil.move(str(old_report), str(target))
+    except OSError:
+        # Exporting remains available even if an old file is temporarily locked.
+        pass
     load_license_settings()
     configure_windows_dpi()
     root = tk.Tk()
@@ -1392,7 +1586,7 @@ def main():
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save cost export",
-                initialdir=str(destination_dir),
+                initialdir=str(general_export_directory(False)),
                 initialfile=default_name,
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
@@ -1402,6 +1596,7 @@ def main():
                     Path(destination_name), source, summary, detail, unique_users,
                     user_costs, without_license,
                     user_licenses,
+                    include_average_cost_sheets=True,
                 )
                 append_history(source, summary, unique_users, len(without_license), member_updated)
                 total_cost = sum(row["cost"] or 0 for row in summary)
@@ -1435,7 +1630,7 @@ def main():
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save full license report",
-                initialdir=str(export_directory()),
+                initialdir=str(general_export_directory(True)),
                 initialfile=default_name,
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
@@ -1445,6 +1640,7 @@ def main():
                     Path(destination_name), source, summary, detail, unique_users,
                     user_costs, without_license, user_licenses,
                     full_license_report=True,
+                    include_average_cost_sheets=True,
                 )
                 append_history(
                     source, summary, unique_users, len(without_license), member_updated,
@@ -1474,6 +1670,8 @@ def main():
         if not costcenter:
             return
         full_license_report = choose_export_scope(root, f"Export for cost center: {costcenter}")
+        if full_license_report is None:
+            return
         try:
             services = read_report(source)
             selected_members = {
@@ -1500,7 +1698,7 @@ def main():
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save cost center export",
-                initialdir=str(export_directory()),
+                initialdir=str(custom_export_directory()),
                 initialfile=default_name,
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
@@ -1532,7 +1730,16 @@ def main():
         manager = choose_manager(root, current_members)
         if not manager:
             return
+        manager_email = resolve_manager_email(manager, current_members)
+        if not manager_email:
+            manager_email = simpledialog.askstring(
+                "Cost center manager email",
+                f"Enter the email address for {manager} to enable the Outlook option:",
+                parent=root,
+            ) or ""
         full_license_report = choose_export_scope(root, f"Export for manager: {manager}")
+        if full_license_report is None:
+            return
         try:
             services = read_report(source)
             selected_members = {
@@ -1563,7 +1770,7 @@ def main():
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save manager export",
-                initialdir=str(export_directory()),
+                initialdir=str(custom_export_directory()),
                 initialfile=default_name,
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
@@ -1574,6 +1781,12 @@ def main():
                     unique_users, user_costs, without_license, user_licenses,
                     full_license_report=full_license_report,
                 )
+                if manager_email:
+                    offer_supervisor_email(
+                        root, destination_name, manager_email,
+                        full_license_report=full_license_report,
+                        recipient_role="cost center manager",
+                    )
                 messagebox.showinfo(
                     "Manager export complete",
                     f"Manager: {manager}\n"
@@ -1596,6 +1809,8 @@ def main():
         if not position:
             return
         full_license_report = choose_export_scope(root, f"Export for position title: {position}")
+        if full_license_report is None:
+            return
         try:
             selected_accounts = {
                 key for key, member in current_members.items()
@@ -1626,7 +1841,7 @@ def main():
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save position title export",
-                initialdir=str(export_directory()),
+                initialdir=str(custom_export_directory()),
                 initialfile=default_name,
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
@@ -1658,6 +1873,8 @@ def main():
         if not supervisor:
             return
         full_license_report = choose_export_scope(root, f"Export for supervisor: {supervisor}")
+        if full_license_report is None:
+            return
         try:
             selected_accounts = {
                 key for key, member in current_members.items()
@@ -1688,7 +1905,7 @@ def main():
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save supervisor export",
-                initialdir=str(export_directory()),
+                initialdir=str(supervisor_export_directory(supervisor, full_license_report)),
                 initialfile=default_name,
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
@@ -1697,6 +1914,10 @@ def main():
                 export_report(
                     Path(destination_name), source, summary, detail,
                     unique_users, user_costs, without_license, user_licenses,
+                    full_license_report=full_license_report,
+                )
+                offer_supervisor_email(
+                    root, destination_name, supervisor,
                     full_license_report=full_license_report,
                 )
                 messagebox.showinfo(
@@ -1720,6 +1941,8 @@ def main():
         if not source:
             return
         full_license_report = choose_export_scope(root, "Export selected users by email")
+        if full_license_report is None:
+            return
         try:
             email_to_account = {
                 value.get("email", "").casefold(): key
@@ -1747,7 +1970,7 @@ def main():
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save selected users export",
-                initialdir=str(export_directory()),
+                initialdir=str(custom_export_directory()),
                 initialfile=default_name,
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
@@ -1779,6 +2002,8 @@ def main():
         if not source:
             return
         full_license_report = choose_export_scope(root, "Export users with multiple chargeable licenses")
+        if full_license_report is None:
+            return
         try:
             services = read_report(source)
             _, _, _, all_user_costs, _, _ = calculate(
@@ -1808,7 +2033,7 @@ def main():
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save multiple-license users export",
-                initialdir=str(export_directory()),
+                initialdir=str(custom_export_directory()),
                 initialfile=f"{'Full_License_Report' if full_license_report else 'AI'}_Users_Multiple_Chargeable_Licenses_{datetime.now():%Y%m%d_%H%M}.xlsx",
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
@@ -1838,6 +2063,8 @@ def main():
         try:
             services = read_report(source)
             full_license_report = choose_export_scope(root, "Export selected licenses")
+            if full_license_report is None:
+                return
             selected_names = choose_licenses(root, services, include_non_ai=full_license_report)
             if not selected_names:
                 return
@@ -1849,7 +2076,7 @@ def main():
             destination_name = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save selected licenses export",
-                initialdir=str(export_directory()),
+                initialdir=str(custom_export_directory()),
                 initialfile=f"{'Full_License_Report' if full_license_report else 'AI_License_Cost'}_Selected_Licenses_{datetime.now():%Y%m%d_%H%M}.xlsx",
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
