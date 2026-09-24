@@ -121,6 +121,31 @@ def history_file() -> Path:
     return folder / "AI_Cost_History.xlsx"
 
 
+def load_previous_ai_metrics():
+    """Return the latest AI-only dashboard metrics from History, if available."""
+    path = history_file()
+    if not path.exists():
+        return None
+    try:
+        workbook = load_workbook(path, data_only=True, read_only=True)
+        if "History" not in workbook.sheetnames:
+            return None
+        sheet = workbook["History"]
+        rows = list(sheet.iter_rows(min_row=2, values_only=True))
+        if not rows:
+            return None
+        row = rows[-1]
+        return {
+            "users": float(row[2] or 0),
+            "monthly": float(row[3] or 0),
+            "projection": float(row[4] or 0),
+            "average": float(row[5] or 0) if isinstance(row[5], (int, float)) else 0.0,
+            "without": float(row[7] or 0),
+        }
+    except (OSError, IndexError, TypeError, ValueError):
+        return None
+
+
 def members_file() -> Path:
     folder = export_directory() / "history"
     folder.mkdir(parents=True, exist_ok=True)
@@ -519,6 +544,10 @@ def offer_supervisor_email(root, destination, supervisor, full_license_report=Fa
         f"<p>Please find attached the {report_label} for the users assigned to you.</p>"
         f"<p>Communication date: {communication_date}</p>"
         "<p>Please review the assigned licenses and let us know if any changes are required.</p>"
+        '<p>For information about the software license ordering process, please click '
+        '<a href="https://telekom.sharepoint.de/sites/T-DigitalGreece/Instructions_Guides_2026/Local%20IT/IT%20Orders%20-%20Software/Order%20new%20software%20license%20guide.pdf">here</a>.</p>'
+        '<p>For any IT-related issue, please click '
+        '<a href="https://jira.telekom.de/servicedesk/customer/portal/1326/create/6653">here</a>.</p>'
         "<p>Best regards,<br>T-Digital IT</p>"
     )
     def applescript_string(value):
@@ -933,6 +962,34 @@ def show_history(root):
     )
 
 
+def configure_autocomplete(combo, variable, options):
+    """Allow typing while narrowing a combobox's choices as the user types."""
+    ordered_options = list(options)
+
+    def update_choices(event=None):
+        if event and event.keysym in {"Up", "Down", "Left", "Right", "Return", "Escape", "Tab"}:
+            return
+        typed = variable.get().strip().casefold()
+        if not typed:
+            combo.configure(values=ordered_options)
+            return
+        starts = [item for item in ordered_options if item.casefold().startswith(typed)]
+        contains = [item for item in ordered_options if typed in item.casefold()]
+        combo.configure(values=starts or contains or ordered_options)
+
+    combo.bind("<KeyRelease>", update_choices, add="+")
+
+
+def canonical_choice(value, options):
+    """Return the catalogue spelling for a typed choice, or None if invalid."""
+    normalized = value.strip().casefold()
+    exact = [item for item in options if item.casefold() == normalized]
+    if exact:
+        return exact[0]
+    starts = [item for item in options if item.casefold().startswith(normalized)] if normalized else []
+    return starts[0] if len(starts) == 1 else None
+
+
 def choose_costcenter(root, members):
     costcenters = sorted({m.get("costcenter", "") for m in members.values() if m.get("costcenter")})
     if not costcenters:
@@ -945,12 +1002,17 @@ def choose_costcenter(root, members):
     window.grab_set()
     selected = tk.StringVar(value=costcenters[0])
     ttk.Label(window, text="Cost center:").pack(pady=(20, 6))
-    combo = ttk.Combobox(window, textvariable=selected, values=costcenters, state="readonly", width=35)
+    combo = ttk.Combobox(window, textvariable=selected, values=costcenters, state="normal", width=35)
     combo.pack()
+    configure_autocomplete(combo, selected, costcenters)
     result = {"value": None}
 
     def confirm():
-        result["value"] = selected.get()
+        choice = canonical_choice(selected.get(), costcenters)
+        if choice is None:
+            messagebox.showwarning("Select a cost center", "Type or select a valid cost center.", parent=window)
+            return
+        result["value"] = choice
         window.destroy()
 
     ttk.Button(window, text="Continue", command=confirm).pack(pady=14)
@@ -974,12 +1036,17 @@ def choose_manager(root, members):
     window.grab_set()
     selected = tk.StringVar(value=managers[0])
     ttk.Label(window, text="Cost center manager:").pack(pady=(20, 6))
-    combo = ttk.Combobox(window, textvariable=selected, values=managers, state="readonly", width=45)
+    combo = ttk.Combobox(window, textvariable=selected, values=managers, state="normal", width=45)
     combo.pack()
+    configure_autocomplete(combo, selected, managers)
     result = {"value": None}
 
     def confirm():
-        result["value"] = selected.get()
+        choice = canonical_choice(selected.get(), managers)
+        if choice is None:
+            messagebox.showwarning("Select a manager", "Type or select a valid manager.", parent=window)
+            return
+        result["value"] = choice
         window.destroy()
 
     ttk.Button(window, text="Continue", command=confirm).pack(pady=14)
@@ -1051,12 +1118,17 @@ def choose_supervisor(root, hr_records):
     window.grab_set()
     selected = tk.StringVar(value=supervisors[0])
     ttk.Label(window, text="Supervisor mail:").pack(pady=(20, 6))
-    combo = ttk.Combobox(window, textvariable=selected, values=supervisors, state="readonly", width=58)
+    combo = ttk.Combobox(window, textvariable=selected, values=supervisors, state="normal", width=58)
     combo.pack()
+    configure_autocomplete(combo, selected, supervisors)
     result = {"value": None}
 
     def confirm():
-        result["value"] = selected.get()
+        choice = canonical_choice(selected.get(), supervisors)
+        if choice is None:
+            messagebox.showwarning("Select a supervisor", "Type or select a valid supervisor email.", parent=window)
+            return
+        result["value"] = choice
         window.destroy()
 
     ttk.Button(window, text="Continue", command=confirm).pack(pady=14)
@@ -1249,7 +1321,7 @@ def manage_licenses(root):
     root.wait_window(window)
 
 
-def add_daily_joke_ticker(parent):
+def add_daily_joke_ticker(parent, show_ticker=True, text_var=None):
     setups = [
         "Why did the spreadsheet apply for a job?",
         "Why was the dashboard invited to the meeting?",
@@ -1317,6 +1389,13 @@ def add_daily_joke_ticker(parent):
     jokes = [f"{setup} {punchline}" for setup in setups for punchline in punchlines]
     random.SystemRandom().shuffle(jokes)
     joke_index = 0
+    if not show_ticker:
+        def new_header_joke():
+            nonlocal joke_index
+            joke_index = (joke_index + 1) % len(jokes)
+            if text_var is not None:
+                text_var.set(jokes[joke_index])
+        return new_header_joke
     ticker = tk.Frame(parent, background="#ffffff", height=32)
     ticker.pack(fill="x", padx=34, pady=(0, 10))
     ticker.pack_propagate(False)
@@ -1331,7 +1410,7 @@ def add_daily_joke_ticker(parent):
         canvas.itemconfigure(text_id, text=jokes[joke_index])
         canvas.coords(text_id, 105, 16)
 
-    ttk.Button(parent, text="New joke", command=new_joke).pack(anchor="e", padx=34, pady=(0, 8))
+    ttk.Button(parent, text="New joke", style="Telekom.TButton", command=new_joke).pack(anchor="e", padx=34, pady=(0, 8))
 
     def scroll():
         canvas.move(text_id, -1, 0)
@@ -1341,6 +1420,162 @@ def add_daily_joke_ticker(parent):
         canvas.after(35, scroll)
 
     canvas.after(300, scroll)
+
+
+def open_snake_game(parent):
+    """Open the small hidden Nokia-style Snake Easter egg."""
+    game = tk.Toplevel(parent)
+    game.title("AI Cost Calculator · Snake")
+    game.configure(background="#20282e")
+    game.resizable(False, False)
+    cell = 20
+    columns, rows = 20, 15
+    canvas = tk.Canvas(game, width=columns * cell, height=rows * cell,
+                       background="#101519", highlightthickness=0)
+    canvas.pack(padx=14, pady=(14, 8))
+    score_var = tk.StringVar(value="Score: 0")
+    tk.Label(game, textvariable=score_var, background="#20282e", foreground="#ffffff",
+             font=("Arial", 10, "bold")).pack(pady=(0, 8))
+    tk.Label(game, text="Arrow keys / WASD · Space to restart · Esc to close",
+             background="#20282e", foreground="#aeb8bf", font=("Arial", 9)).pack(pady=(0, 12))
+
+    state = {
+        "snake": [(8, 7), (7, 7), (6, 7)],
+        "direction": (1, 0),
+        "queued": (1, 0),
+        "food": (14, 7),
+        "score": 0,
+        "over": False,
+    }
+
+    def new_food():
+        available = [(x, y) for x in range(columns) for y in range(rows) if (x, y) not in state["snake"]]
+        return random.choice(available) if available else None
+
+    def draw():
+        canvas.delete("all")
+        for x, y in state["snake"]:
+            canvas.create_rectangle(x * cell + 2, y * cell + 2, (x + 1) * cell - 2,
+                                    (y + 1) * cell - 2, fill="#e20074", outline="")
+        if state["food"]:
+            x, y = state["food"]
+            canvas.create_oval(x * cell + 3, y * cell + 3, (x + 1) * cell - 3,
+                               (y + 1) * cell - 3, fill="#ffffff", outline="")
+        score_var.set(f"Score: {state['score']}")
+
+    def restart(event=None):
+        state.update({
+            "snake": [(8, 7), (7, 7), (6, 7)],
+            "direction": (1, 0),
+            "queued": (1, 0),
+            "food": (14, 7),
+            "score": 0,
+            "over": False,
+        })
+        draw()
+        step()
+
+    def keypress(event):
+        key = event.keysym.lower()
+        if key == "escape":
+            game.destroy()
+            return
+        if key == "space" and state["over"]:
+            restart()
+            return
+        directions = {
+            "up": (0, -1), "w": (0, -1), "down": (0, 1), "s": (0, 1),
+            "left": (-1, 0), "a": (-1, 0), "right": (1, 0), "d": (1, 0),
+        }
+        proposed = directions.get(key)
+        if proposed and proposed != (-state["direction"][0], -state["direction"][1]):
+            state["queued"] = proposed
+
+    def step():
+        if not game.winfo_exists() or state["over"]:
+            return
+        state["direction"] = state["queued"]
+        head_x, head_y = state["snake"][0]
+        dx, dy = state["direction"]
+        head = (head_x + dx, head_y + dy)
+        if (head[0] < 0 or head[0] >= columns or head[1] < 0 or head[1] >= rows
+                or head in state["snake"]):
+            state["over"] = True
+            canvas.create_text(columns * cell // 2, rows * cell // 2,
+                               text="GAME OVER\nPress SPACE to restart", fill="#ffffff",
+                               font=("Arial", 15, "bold"), justify="center")
+            return
+        state["snake"].insert(0, head)
+        if head == state["food"]:
+            state["score"] += 1
+            state["food"] = new_food()
+        else:
+            state["snake"].pop()
+        draw()
+        game.after(115, step)
+
+    game.bind("<KeyPress>", keypress)
+    game.protocol("WM_DELETE_WINDOW", game.destroy)
+    game.focus_force()
+    draw()
+    game.after(115, step)
+
+
+def open_budget_universe(parent, preview_vars):
+    """Show playful equivalents for the current license budget."""
+    def amount(key):
+        raw = preview_vars[key].get().replace("€", "").replace(",", "").strip()
+        try:
+            return float(raw)
+        except ValueError:
+            return 0.0
+
+    monthly = amount("monthly")
+    annual = amount("projection")
+    window = tk.Toplevel(parent)
+    window.title("AI Cost Calculator · Budget Universe")
+    window.configure(background="#ffffff")
+    window.geometry("620x520")
+    window.minsize(520, 420)
+
+    tk.Label(window, text="BUDGET UNIVERSE", background="#ffffff", foreground="#e20074",
+             font=("Arial", 11, "bold")).pack(pady=(22, 2))
+    tk.Label(window, text="What else could we buy with this budget?", background="#ffffff",
+             foreground="#263238", font=("Arial", 19, "bold")).pack()
+    tk.Label(window, text=f"Monthly: €{monthly:,.2f}   ·   12-month projection: €{annual:,.2f}",
+             background="#ffffff", foreground="#6c7780", font=("Arial", 10)).pack(pady=(6, 18))
+
+    table = tk.Frame(window, background="#ffffff")
+    table.pack(fill="both", expand=True, padx=34, pady=(0, 18))
+    table.columnconfigure(0, weight=1)
+    table.columnconfigure(1, weight=1)
+    table.columnconfigure(2, weight=1)
+    headers = ("Equivalent", "Reference price", "Per year")
+    for column, header in enumerate(headers):
+        tk.Label(table, text=header, background="#20282e", foreground="#ffffff",
+                 font=("Arial", 10, "bold"), padx=10, pady=8).grid(row=0, column=column, sticky="ew")
+    equivalents = (
+        ("Coffee", 4),
+        ("Team dinner", 35),
+        ("Business laptop", 1400),
+        ("Porsche", 120000),
+        ("Ferrari", 280000),
+        ("Lamborghini", 320000),
+        ("Apartment", 250000),
+        ("House", 450000),
+        ("Holiday home", 750000),
+        ("Private jet hour", 8000),
+    )
+    for row, (label, price) in enumerate(equivalents, start=1):
+        background = "#ffffff" if row % 2 else "#f7f8f9"
+        yearly_count = annual / price if price else 0
+        values = (label, f"€{price:,.0f}", f"{yearly_count:,.2f}")
+        for column, value in enumerate(values):
+            tk.Label(table, text=value, background=background, foreground="#263238",
+                     anchor="w" if column == 0 else "e", padx=10, pady=6,
+                     font=("Arial", 10)).grid(row=row, column=column, sticky="ew")
+    tk.Label(window, text="Indicative reference prices · just for fun", background="#ffffff",
+             foreground="#8a959c", font=("Arial", 9)).pack(pady=(0, 16))
 
 
 def show_startup_splash(root):
@@ -1433,23 +1668,94 @@ def main():
     root.geometry(f"{initial_width}x{initial_height}")
     root.minsize(min(560, max(420, screen_width - 80)), min(620, max(460, screen_height - 100)))
     root.resizable(True, True)
-    root.configure(background="#f3f3f3")
+    root.configure(background="#ffffff")
     show_startup_splash(root)
     style = ttk.Style(root)
-    style.configure("Telekom.TButton", font=("Arial", 11), padding=(12, 8))
-    style.configure("Telekom.TLabel", background="#f3f3f3", foreground="#333333")
-    main_canvas = tk.Canvas(root, background="#f3f3f3", highlightthickness=0)
+    style.theme_use("clam")
+    style.configure("TFrame", background="#ffffff")
+    style.configure("TLabel", background="#ffffff", foreground="#333333")
+    style.configure("TLabelframe", background="#ffffff", bordercolor="#d8dde1")
+    style.configure("TLabelframe.Label", background="#ffffff", foreground="#333333")
+    style.configure("App.TFrame", background="#ffffff")
+    style.configure("App.TLabel", background="#ffffff", foreground="#263238")
+    style.configure("Status.TLabel", background="#ffffff", foreground="#6c7780", font=("Arial", 9))
+    style.configure("Card.TLabelframe", background="#ffffff", bordercolor="#e1e6e9", relief="solid")
+    style.configure("Card.TLabelframe.Label", background="#ffffff", foreground="#263238", font=("Arial", 10, "bold"))
+    style.configure("TNotebook", background="#ffffff", borderwidth=0)
+    style.configure("TNotebook.Tab", padding=(16, 8), font=("Arial", 10))
+    style.map("TNotebook.Tab", background=[("selected", "#ffffff")], foreground=[("selected", "#e20074")])
+    style.layout("Hidden.TNotebook.Tab", [])
+    style.configure("Hidden.TNotebook", background="#ffffff", borderwidth=0)
+    style.configure(
+        "Telekom.TButton",
+        font=("Arial", 11, "bold"),
+        padding=(12, 8),
+        background="#e20074",
+        foreground="#ffffff",
+        bordercolor="#e20074",
+        lightcolor="#e20074",
+        darkcolor="#e20074",
+    )
+    style.map(
+        "Telekom.TButton",
+        background=[("active", "#b9005e"), ("pressed", "#a90056"), ("disabled", "#ef9ac2")],
+        foreground=[("disabled", "#ffffff"), ("!disabled", "#ffffff")],
+    )
+    style.configure("Telekom.TLabel", background="#ffffff", foreground="#333333")
+    main_canvas = tk.Canvas(root, background="#ffffff", highlightthickness=0)
     scrollbar = ttk.Scrollbar(root, orient="vertical", command=main_canvas.yview)
     main_canvas.pack(side="left", fill="both", expand=True)
     scrollbar.pack(side="right", fill="y")
     main_canvas.configure(yscrollcommand=scrollbar.set)
-    content = ttk.Frame(main_canvas)
-    content_id = main_canvas.create_window((0, 0), window=content, anchor="nw")
-    content.bind("<Configure>", lambda event: main_canvas.configure(scrollregion=main_canvas.bbox("all")))
+    outer_content = tk.Frame(main_canvas, background="#ffffff")
+    content_id = main_canvas.create_window((0, 0), window=outer_content, anchor="nw")
+    outer_content.bind("<Configure>", lambda event: main_canvas.configure(scrollregion=main_canvas.bbox("all")))
     main_canvas.bind("<Configure>", lambda event: main_canvas.itemconfigure(content_id, width=event.width))
     main_canvas.bind_all("<MouseWheel>", lambda event: main_canvas.yview_scroll(int(-event.delta / 120), "units"))
     main_canvas.bind_all("<Button-4>", lambda event: main_canvas.yview_scroll(-3, "units"))
     main_canvas.bind_all("<Button-5>", lambda event: main_canvas.yview_scroll(3, "units"))
+    app_shell = tk.Frame(outer_content, background="#ffffff")
+    app_shell.pack(fill="both", expand=True)
+    navigation_rail = tk.Frame(app_shell, background="#20282e", width=168)
+    navigation_rail.pack(side="left", fill="y")
+    navigation_rail.pack_propagate(False)
+    ai_logo = tk.Label(navigation_rail, text="AI", background="#e20074", foreground="#ffffff",
+                       font=("Arial", 18, "bold"), width=3, pady=5, cursor="arrow")
+    ai_logo.pack(pady=(24, 20))
+    logo_click_state = {"count": 0, "timer": None}
+
+    def logo_click(event=None):
+        logo_click_state["count"] += 1
+        if logo_click_state["timer"] is not None:
+            root.after_cancel(logo_click_state["timer"])
+        logo_click_state["timer"] = root.after(1400, lambda: logo_click_state.update(count=0, timer=None))
+        if logo_click_state["count"] >= 5:
+            logo_click_state.update(count=0, timer=None)
+            open_snake_game(root)
+
+    ai_logo.bind("<Button-1>", logo_click)
+    content = tk.Frame(app_shell, background="#ffffff")
+    content.pack(side="left", fill="both", expand=True)
+    current_members, member_updated = load_saved_members()
+    status_var = tk.StringVar(value=f"Costcenter data: {member_updated}")
+    current_hr, hr_updated = load_saved_hr()
+    hr_status_var = tk.StringVar(value=f"HR data: {hr_updated}")
+    current_source = None
+    source_status_var = tk.StringVar(value="AD report: Not selected")
+    rail_status = tk.Frame(navigation_rail, background="#20282e")
+    rail_status.pack(side="bottom", fill="x", padx=12, pady=18)
+    for status_variable in (status_var, hr_status_var, source_status_var):
+        tk.Label(
+            rail_status,
+            textvariable=status_variable,
+            background="#20282e",
+            foreground="#aeb8bf",
+            anchor="w",
+            justify="left",
+            wraplength=142,
+            font=("Arial", 8),
+        ).pack(fill="x", pady=3)
+
     header = tk.Frame(content, background="#e20074", height=108)
     header.pack(fill="x")
     header.pack_propagate(False)
@@ -1460,15 +1766,6 @@ def main():
     tk.Label(title_frame, text="License cost management", background="#e20074", foreground="white", font=("Arial", 11), anchor="w").pack(anchor="w")
     add_daily_joke_ticker(content)
     ttk.Label(content, text="Calculate monthly AI licence costs and keep a history.", style="Telekom.TLabel").pack(pady=(18, 10))
-    current_members, member_updated = load_saved_members()
-    status_var = tk.StringVar(value=f"Costcenter data: {member_updated}")
-    ttk.Label(content, textvariable=status_var, foreground="#555555").pack(pady=(0, 12))
-    current_hr, hr_updated = load_saved_hr()
-    hr_status_var = tk.StringVar(value=f"HR data: {hr_updated}")
-    ttk.Label(content, textvariable=hr_status_var, foreground="#555555").pack(pady=(0, 12))
-    current_source = None
-    source_status_var = tk.StringVar(value="AD report: Not selected")
-    ttk.Label(content, textvariable=source_status_var, foreground="#555555").pack(pady=(0, 12))
     preview_vars = {
         "users": tk.StringVar(value="—"),
         "monthly": tk.StringVar(value="—"),
@@ -1476,6 +1773,9 @@ def main():
         "projection": tk.StringVar(value="—"),
         "without": tk.StringVar(value="—"),
     }
+    preview_delta_vars = {key: tk.StringVar(value="") for key in preview_vars}
+    preview_delta_labels = {}
+    licensed_percent_var = tk.StringVar(value="")
     preview = ttk.LabelFrame(content, text="Live Preview", padding=10)
     preview.pack(fill="x", padx=34, pady=(0, 14))
     preview_columns = [
@@ -1491,6 +1791,76 @@ def main():
         preview.columnconfigure(column, weight=1)
         ttk.Label(card, text=label, style="Telekom.TLabel", wraplength=120, justify="center").pack()
         ttk.Label(card, textvariable=preview_vars[key], font=("Arial", 13, "bold"), foreground="#e20074").pack(pady=(4, 0))
+        if key == "users":
+            ttk.Label(card, textvariable=licensed_percent_var, style="Telekom.TLabel",
+                      font=("Arial", 9), foreground="#18864b", justify="center").pack(pady=(1, 0))
+        preview_delta_labels[key] = tk.Label(
+            card, textvariable=preview_delta_vars[key], background="#ffffff",
+            foreground="#6c7780", font=("Arial", 9), justify="center",
+        )
+        preview_delta_labels[key].pack(pady=(2, 0))
+
+    content.bind(
+        "<Triple-Button-1>",
+        lambda event: open_budget_universe(root, preview_vars),
+    )
+
+    sections = ttk.Notebook(content, style="Hidden.TNotebook")
+    sections.pack(fill="both", expand=True, padx=26, pady=(0, 10))
+    reports_tab = ttk.Frame(sections, padding=12)
+    exports_tab = ttk.Frame(sections, padding=12)
+    data_tab = ttk.Frame(sections, padding=12)
+    history_tab = ttk.Frame(sections, padding=12)
+    settings_tab = ttk.Frame(sections, padding=12)
+    sections.add(reports_tab, text="Reports")
+    sections.add(exports_tab, text="Exports")
+    sections.add(data_tab, text="Data & History")
+    sections.add(history_tab, text="History")
+    sections.add(settings_tab, text="Settings")
+
+    navigation_buttons = []
+    selected_section = 0
+
+    def ignore_navigation_scroll(event):
+        return "break"
+
+    for navigation_event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        navigation_rail.bind(navigation_event, ignore_navigation_scroll)
+
+    def select_section(index):
+        nonlocal selected_section
+        selected_section = index
+        sections.select(index)
+        for button_index, button in enumerate(navigation_buttons):
+            button.configure(
+                background="#e20074" if button_index == index else "#20282e",
+                foreground="#ffffff",
+            )
+
+    def tab_hover(event, button, entering):
+        button_index = navigation_buttons.index(button)
+        if button_index != selected_section:
+            button.configure(background="#3b4851" if entering else "#20282e")
+
+    for index, label in enumerate(("Reports", "Exports", "Data", "History", "Settings")):
+        nav_button = tk.Label(
+            navigation_rail,
+            text=label,
+            anchor="w",
+            padx=18,
+            pady=13,
+            background="#20282e",
+            foreground="#ffffff",
+            font=("Arial", 10),
+        )
+        nav_button.pack(fill="x", padx=10, pady=(12 if index == 0 else 2, 2))
+        nav_button.bind("<Button-1>", lambda event, tab_index=index: select_section(tab_index))
+        for navigation_event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            nav_button.bind(navigation_event, ignore_navigation_scroll)
+        navigation_buttons.append(nav_button)
+        nav_button.bind("<Enter>", lambda event, button=nav_button: tab_hover(event, button, True))
+        nav_button.bind("<Leave>", lambda event, button=nav_button: tab_hover(event, button, False))
+    select_section(0)
 
     def update_preview(summary, unique_users, without_license):
         total_cost = sum(row["cost"] or 0 for row in summary)
@@ -1500,6 +1870,42 @@ def main():
         preview_vars["average"].set(f"€{total_cost / user_count:,.2f}" if user_count else "n.a.")
         preview_vars["projection"].set(f"€{total_cost * 12:,.2f}")
         preview_vars["without"].set(f"{len(without_license):,}")
+        total_users = user_count + len(without_license)
+        licensed_percent = (user_count / total_users * 100) if total_users else 0
+        licensed_percent_var.set(f"{licensed_percent:.2f}% of users have an AI license")
+        current = {
+            "users": float(user_count),
+            "monthly": float(total_cost),
+            "average": float(total_cost / user_count) if user_count else 0.0,
+            "projection": float(total_cost * 12),
+            "without": float(len(without_license)),
+        }
+        previous = load_previous_ai_metrics()
+        direction_colors = {
+            "users": {"up": "#18864b", "down": "#c62828"},
+            "monthly": {"up": "#c62828", "down": "#18864b"},
+            "average": {"up": "#c62828", "down": "#18864b"},
+            "projection": {"up": "#c62828", "down": "#18864b"},
+            "without": {"up": "#c62828", "down": "#18864b"},
+        }
+        for key, value in current.items():
+            if previous is None:
+                preview_delta_vars[key].set("")
+                continue
+            old_value = previous.get(key, 0.0)
+            if abs(value - old_value) < 0.005:
+                preview_delta_vars[key].set("— stable")
+                preview_delta_labels[key].configure(foreground="#6c7780")
+            elif old_value == 0:
+                arrow = "↑" if value > 0 else "↓"
+                preview_delta_vars[key].set(f"{arrow} new")
+                preview_delta_labels[key].configure(foreground=direction_colors[key]["up" if value > 0 else "down"])
+            else:
+                change = ((value - old_value) / abs(old_value)) * 100
+                trend = "up" if change > 0 else "down"
+                arrow = "↑" if change > 0 else "↓"
+                preview_delta_vars[key].set(f"{arrow} {abs(change):.1f}%")
+                preview_delta_labels[key].configure(foreground=direction_colors[key][trend])
 
     def update_members():
         nonlocal current_members, member_updated
@@ -1509,6 +1915,20 @@ def main():
             filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")],
         )
         if not member_name:
+            return False
+        try:
+            current_members = read_costcenter_report(Path(member_name))
+            member_updated = save_members(current_members)
+            status_var.set(f"Costcenter data: {member_updated}")
+            messagebox.showinfo(
+                "Costcenter data updated",
+                f"Saved {len(current_members)} members.\n\n"
+                "This report will be used automatically for future calculations.",
+                parent=root,
+            )
+            return True
+        except Exception as exc:
+            messagebox.showerror("Could not update Costcenter data", str(exc), parent=root)
             return False
 
     def update_hr_report():
@@ -1534,21 +1954,6 @@ def main():
         except Exception as exc:
             messagebox.showerror("Could not update HR data", str(exc), parent=root)
             return False
-        try:
-            current_members = read_costcenter_report(Path(member_name))
-            member_updated = save_members(current_members)
-            status_var.set(f"Costcenter data: {member_updated}")
-            messagebox.showinfo(
-                "Costcenter data updated",
-                f"Saved {len(current_members)} members.\n\n"
-                "This report will be used automatically for future calculations.",
-                parent=root,
-            )
-            return True
-        except Exception as exc:
-            messagebox.showerror("Could not update Costcenter data", str(exc), parent=root)
-            return False
-
     def select_source_report():
         nonlocal current_source
         source_name = filedialog.askopenfilename(
@@ -1582,14 +1987,17 @@ def main():
                 raise ValueError("No matching AI services were found.")
             update_preview(summary, unique_users, without_license)
             default_name = f"AI_Cost_Calculator_{datetime.now():%Y%m%d_%H%M}.xlsx"
-            destination_dir = export_directory()
-            destination_name = filedialog.asksaveasfilename(
+            selected_destination = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save cost export",
                 initialdir=str(general_export_directory(False)),
                 initialfile=default_name,
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
+            )
+            destination_name = (
+                str(general_export_directory(False) / Path(selected_destination).name)
+                if selected_destination else ""
             )
             if destination_name:
                 export_report(
@@ -1627,13 +2035,17 @@ def main():
             if not detail:
                 raise ValueError("No configured licenses were found in the report.")
             default_name = f"Full_License_Report_{datetime.now():%Y%m%d_%H%M}.xlsx"
-            destination_name = filedialog.asksaveasfilename(
+            selected_destination = filedialog.asksaveasfilename(
                 parent=root,
                 title="Save full license report",
                 initialdir=str(general_export_directory(True)),
                 initialfile=default_name,
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
+            )
+            destination_name = (
+                str(general_export_directory(True) / Path(selected_destination).name)
+                if selected_destination else ""
             )
             if destination_name:
                 export_report(
@@ -2097,30 +2509,38 @@ def main():
         except Exception as exc:
             messagebox.showerror("Could not export selected licenses", str(exc), parent=root)
 
-    ttk.Label(content, text="EXPORTS", style="Telekom.TLabel", font=("Arial", 10, "bold")).pack(anchor="w", padx=34, pady=(6, 2))
-    exports = ttk.Frame(content)
-    exports.pack(fill="x", padx=34)
+    ttk.Label(reports_tab, text="STANDARD REPORTS", style="Telekom.TLabel", font=("Arial", 10, "bold")).pack(anchor="w", pady=(2, 6))
+    reports = ttk.Frame(reports_tab)
+    reports.pack(anchor="center", pady=4)
+    ttk.Button(reports, text="AI Cost Calculator - Basic Report", width=36, style="Telekom.TButton", command=run_calculator).pack(padx=3, pady=3)
+    ttk.Button(reports, text="Full License Report", width=36, style="Telekom.TButton", command=run_full_license_export).pack(padx=3, pady=3)
+    ttk.Label(reports_tab, text="Choose AI Report or Full Report for filtered exports.", foreground="#666666").pack(anchor="w", pady=(12, 0))
+
+    ttk.Label(exports_tab, text="CUSTOM EXPORTS", style="Telekom.TLabel", font=("Arial", 10, "bold")).pack(anchor="w", pady=(2, 6))
+    exports = ttk.Frame(exports_tab)
+    exports.pack(fill="x")
     exports.columnconfigure(0, weight=1)
     exports.columnconfigure(1, weight=1)
-    ttk.Button(exports, text="AI Cost Calculator - Basic Report", style="Telekom.TButton", command=run_calculator).grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export Cost Center", style="Telekom.TButton", command=run_costcenter_export).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export by User Emails", style="Telekom.TButton", command=run_email_export).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export by Cost Center Manager", style="Telekom.TButton", command=run_manager_export).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export by Position Title", style="Telekom.TButton", command=run_position_export).grid(row=3, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export by Supervisor", style="Telekom.TButton", command=run_supervisor_export).grid(row=4, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export by Licenses", style="Telekom.TButton", command=run_license_export).grid(row=5, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export Users with Multiple Chargeable Licenses", style="Telekom.TButton", command=run_multiple_license_export).grid(row=6, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(exports, text="Export Full License Report", style="Telekom.TButton", command=run_full_license_export).grid(row=7, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Label(content, text="DATA & HISTORY", style="Telekom.TLabel", font=("Arial", 10, "bold")).pack(anchor="w", padx=34, pady=(12, 2))
-    data_frame = ttk.Frame(content)
-    data_frame.pack(fill="x", padx=34)
-    data_frame.columnconfigure(0, weight=1)
-    data_frame.columnconfigure(1, weight=1)
-    ttk.Button(data_frame, text="Select / Change AD Report", style="Telekom.TButton", command=select_source_report).grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-    ttk.Button(data_frame, text="Update Costcenter Members", style="Telekom.TButton", command=update_members).grid(row=1, column=0, sticky="ew", padx=3, pady=3)
-    ttk.Button(data_frame, text="View History", style="Telekom.TButton", command=lambda: show_history(root)).grid(row=1, column=1, sticky="ew", padx=3, pady=3)
-    ttk.Button(data_frame, text="Update HR Report", style="Telekom.TButton", command=update_hr_report).grid(row=2, column=0, sticky="ew", padx=3, pady=3)
-    ttk.Button(data_frame, text="License Settings", style="Telekom.TButton", command=lambda: manage_licenses(root)).grid(row=2, column=1, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export Cost Center", style="Telekom.TButton", command=run_costcenter_export).grid(row=0, column=0, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export by User Emails", style="Telekom.TButton", command=run_email_export).grid(row=0, column=1, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export by Cost Center Manager", style="Telekom.TButton", command=run_manager_export).grid(row=1, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export by Position Title", style="Telekom.TButton", command=run_position_export).grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export by Supervisor", style="Telekom.TButton", command=run_supervisor_export).grid(row=3, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export by Licenses", style="Telekom.TButton", command=run_license_export).grid(row=4, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Button(exports, text="Export Users with Multiple Chargeable Licenses", style="Telekom.TButton", command=run_multiple_license_export).grid(row=5, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+    ttk.Label(data_tab, text="DATA", style="Telekom.TLabel", font=("Arial", 10, "bold")).pack(anchor="w", pady=(2, 6))
+    data_frame = ttk.Frame(data_tab)
+    data_frame.pack(anchor="center", pady=4)
+    ttk.Button(data_frame, text="Select / Change AD Report", width=36, style="Telekom.TButton", command=select_source_report).grid(row=0, column=0, padx=3, pady=3)
+    ttk.Button(data_frame, text="Update Costcenter Members", width=36, style="Telekom.TButton", command=update_members).grid(row=1, column=0, padx=3, pady=3)
+    ttk.Button(data_frame, text="Update HR Report", width=36, style="Telekom.TButton", command=update_hr_report).grid(row=2, column=0, padx=3, pady=3)
+    ttk.Label(data_tab, text="Saved reports remain in AI Only, Full, Custom Reports and history folders.", foreground="#666666", wraplength=620).pack(anchor="w", pady=(14, 0))
+    ttk.Label(history_tab, text="HISTORY", style="Telekom.TLabel", font=("Arial", 10, "bold")).pack(anchor="w", pady=(2, 6))
+    ttk.Label(history_tab, text="Review and export saved AI and Full license calculations.", foreground="#666666", wraplength=620).pack(anchor="w", pady=(0, 12))
+    ttk.Button(history_tab, text="View / Export History", style="Telekom.TButton", command=lambda: show_history(root)).pack(fill="x", pady=3)
+    ttk.Label(settings_tab, text="SETTINGS", style="Telekom.TLabel", font=("Arial", 10, "bold")).pack(anchor="w", pady=(2, 6))
+    ttk.Label(settings_tab, text="Manage license names, prices and active status.", foreground="#666666").pack(anchor="w", pady=(0, 12))
+    ttk.Button(settings_tab, text="License Settings", style="Telekom.TButton", command=lambda: manage_licenses(root)).pack(fill="x", pady=3)
     ttk.Button(content, text="Exit", style="Telekom.TButton", command=root.destroy).pack(fill="x", padx=37, pady=(16, 6))
     root.mainloop()
 
