@@ -51,6 +51,16 @@ NON_AI_PRODUCT_PRICES = {
     "Miro Enterprise License": ("Miro Enterprise", 9.00),
     "Global Secure Access for LMD": ("Global Secure Access for LMD", 5.10),
 }
+CODING_AI_LICENSES = {
+    "ChatGPT Enterprise Credit Package L", "Claude Code", "Cursor",
+    "Gemini Code Assist", "GitHub Copilot",
+    "GitHub Copilot Upgrade Package 1 for advanced use",
+    "GitHub Copilot Upgrade Package 2 for intensive use",
+}
+AI_LICENSE_USE = {
+    name: ("Coding" if name in CODING_AI_LICENSES else "Non-coding")
+    for name in PRODUCT_PRICES
+}
 DEFAULT_PRODUCT_PRICES = dict(PRODUCT_PRICES)
 LICENSE_ACTIVE = {name: True for name in PRODUCT_PRICES}
 NON_AI_LICENSE_ACTIVE = {name: True for name in NON_AI_PRODUCT_PRICES}
@@ -183,6 +193,8 @@ def load_license_settings():
             product = clean(values.get("product")) or name
             PRODUCT_PRICES[name] = (product, price)
             LICENSE_ACTIVE[name] = bool(values.get("active", True))
+            category = values.get("use", AI_LICENSE_USE.get(name, "Unclassified"))
+            AI_LICENSE_USE[name] = category if category in ("Coding", "Non-coding") else "Unclassified"
         for name, values in sections.get("non_ai", {}).items():
             if not isinstance(values, dict):
                 continue
@@ -199,7 +211,8 @@ def load_license_settings():
 def save_license_settings():
     settings = {
         "ai": {
-            name: {"product": product, "price": price, "active": LICENSE_ACTIVE.get(name, True)}
+            name: {"product": product, "price": price, "active": LICENSE_ACTIVE.get(name, True),
+                   "use": AI_LICENSE_USE.get(name, "Unclassified")}
             for name, (product, price) in PRODUCT_PRICES.items()
         },
         "non_ai": {
@@ -217,6 +230,23 @@ def active_license_names():
 
 def active_non_ai_license_names():
     return {name for name in NON_AI_PRODUCT_PRICES if NON_AI_LICENSE_ACTIVE.get(name, True)}
+
+
+def ai_cost_split(detail):
+    """Count AI entitlements and divide their monthly spend by use."""
+    split = {name: {"licenses": 0, "cost": 0.0} for name in ("Coding", "Non-coding", "Unclassified")}
+    for row in detail:
+        if row["service"] not in PRODUCT_PRICES:
+            continue
+        category = AI_LICENSE_USE.get(row["service"], "Unclassified")
+        if category not in split:
+            category = "Unclassified"
+        split[category]["licenses"] += row["licenses"]
+        split[category]["cost"] += row["cost"] or 0.0
+    total = sum(group["cost"] for group in split.values())
+    for group in split.values():
+        group["share"] = group["cost"] / total if total else None
+    return split
 
 
 def load_saved_members():
@@ -664,6 +694,19 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
         overview.append(["AI monthly cost (EUR)", ai_cost])
         overview.append(["AI 12-month projection (EUR)", ai_cost * 12])
         overview.append(["Average cost per unique AI user (EUR)", ai_cost / ai_users if ai_users else "n.a."])
+    split = ai_cost_split(detail)
+    overview.append([])
+    split_title_row = overview.max_row + 1
+    overview.append(["AI spend by use"])
+    split_header_row = overview.max_row + 1
+    overview.append(["Category", "Assigned licences", "Monthly AI cost (EUR)", "Share of AI cost"])
+    for category in ("Coding", "Non-coding", "Unclassified"):
+        values = split[category]
+        if category == "Unclassified" and not values["licenses"]:
+            continue
+        overview.append([category, values["licenses"], values["cost"],
+                         values["share"] if values["share"] is not None else "n.a."])
+    split_last_row = overview.max_row
     overview.append([])
     product_header_row = overview.max_row + 1
     overview.append(["Product", "Assigned licences", "Unique users", "Monthly cost (EUR)", "12-month projection (EUR)"])
@@ -690,6 +733,16 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
         overview.cell(12, 2).number_format = '0.00%'
         for row_number in (13, 14, 15):
             overview.cell(row_number, 2).number_format = '€#,##0.00'
+    for cell in overview[split_title_row]:
+        cell.font = Font(color="E20074", bold=True)
+    for cell in overview[split_header_row]:
+        cell.fill = PatternFill("solid", fgColor="E20074")
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    for row_number in range(split_header_row + 1, split_last_row + 1):
+        overview.cell(row_number, 3).number_format = '€#,##0.00'
+        if isinstance(overview.cell(row_number, 4).value, (int, float)):
+            overview.cell(row_number, 4).number_format = '0.0%'
     for cell in overview[product_header_row]:
         cell.fill = PatternFill("solid", fgColor="E20074")
         cell.font = Font(color="FFFFFF", bold=True)
@@ -1269,11 +1322,36 @@ def choose_export_scope(root, export_name):
     return result["value"]
 
 
+def choose_ai_use(parent, current=""):
+    dialog = tk.Toplevel(parent)
+    dialog.title("AI license use")
+    dialog.geometry("380x160")
+    dialog.resizable(False, False)
+    dialog.transient(parent)
+    dialog.grab_set()
+    ttk.Label(dialog, text="How is this AI license used?").pack(pady=(20, 8))
+    selected = tk.StringVar(value=current if current in ("Coding", "Non-coding") else "")
+    ttk.Combobox(dialog, textvariable=selected, values=("Coding", "Non-coding"),
+                 state="readonly", width=24).pack()
+    result = {"value": None}
+
+    def save():
+        if selected.get() not in ("Coding", "Non-coding"):
+            messagebox.showwarning("Choose use", "Select Coding or Non-coding.", parent=dialog)
+            return
+        result["value"] = selected.get()
+        dialog.destroy()
+
+    ttk.Button(dialog, text="Save", command=save).pack(pady=14)
+    parent.wait_window(dialog)
+    return result["value"]
+
+
 def manage_licenses(root):
     window = tk.Toplevel(root)
     window.title("License Settings")
-    window.geometry("780x500")
-    window.minsize(650, 400)
+    window.geometry("900x500")
+    window.minsize(750, 400)
     window.transient(root)
     window.grab_set()
     ttk.Label(
@@ -1285,16 +1363,20 @@ def manage_licenses(root):
     notebook.pack(fill="both", expand=True, padx=16, pady=4)
 
     def build_tab(title, catalog, active_map):
+        is_ai = catalog is PRODUCT_PRICES
         tab = ttk.Frame(notebook, padding=8)
         tab.columnconfigure(0, weight=1)
         tab.rowconfigure(0, weight=1)
         notebook.add(tab, text=title)
-        columns = ("license", "price", "status")
+        columns = ("license", "price", "use", "status") if is_ai else ("license", "price", "status")
         table = ttk.Treeview(tab, columns=columns, show="headings", height=13)
         table.heading("license", text="License")
         table.heading("price", text="Price / user / month (€)")
+        if is_ai:
+            table.heading("use", text="AI use")
+            table.column("use", width=120, anchor="center")
         table.heading("status", text="Status")
-        table.column("license", width=420)
+        table.column("license", width=390)
         table.column("price", width=170, anchor="e")
         table.column("status", width=110, anchor="center")
         scrollbar = ttk.Scrollbar(tab, orient="vertical", command=table.yview)
@@ -1308,7 +1390,8 @@ def manage_licenses(root):
             for name in sorted(catalog, key=str.casefold):
                 _, price = catalog[name]
                 status = "Active" if active_map.get(name, True) else "Inactive"
-                table.insert("", tk.END, iid=name, values=(name, f"€{price:,.2f}", status))
+                values = (name, f"€{price:,.2f}", AI_LICENSE_USE.get(name, "Unclassified"), status) if is_ai else (name, f"€{price:,.2f}", status)
+                table.insert("", tk.END, iid=name, values=values)
 
         def selected_name():
             selected = table.selection()
@@ -1325,8 +1408,13 @@ def manage_licenses(root):
             price = simpledialog.askfloat("Add license", "Monthly price per user (€):", parent=window, minvalue=0)
             if price is None:
                 return
+            category = choose_ai_use(window) if is_ai else None
+            if is_ai and category is None:
+                return
             catalog[name] = (name, price)
             active_map[name] = True
+            if is_ai:
+                AI_LICENSE_USE[name] = category
             save_license_settings()
             refresh()
 
@@ -1363,11 +1451,26 @@ def manage_licenses(root):
             save_license_settings()
             refresh()
 
+        def change_use():
+            name = selected_name()
+            if not name:
+                messagebox.showinfo("Select license", "Select a license first.", parent=window)
+                return
+            category = choose_ai_use(window, AI_LICENSE_USE.get(name, ""))
+            if category is not None:
+                AI_LICENSE_USE[name] = category
+                save_license_settings()
+                refresh()
+
         buttons = ttk.Frame(tab)
         buttons.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(buttons, text="Add License", command=add_license).pack(side="left", padx=(0, 6))
         ttk.Button(buttons, text="Change Price", command=edit_license).pack(side="left", padx=6)
         ttk.Button(buttons, text="Deactivate / Reactivate", command=toggle_license).pack(side="left", padx=6)
+        if is_ai:
+            ttk.Button(tab, text="Set Coding / Non-coding", command=change_use).grid(
+                row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
+            )
         refresh()
 
     build_tab("AI Licenses", PRODUCT_PRICES, LICENSE_ACTIVE)
@@ -1855,6 +1958,20 @@ def main():
         )
         preview_delta_labels[key].pack(pady=(2, 0))
 
+    split_vars = {category: tk.StringVar(value="—") for category in ("Coding", "Non-coding")}
+    split_note_var = tk.StringVar(value="")
+    split_panel = ttk.LabelFrame(content, text="AI cost split", padding=8)
+    split_panel.pack(fill="x", padx=34, pady=(0, 12))
+    for column, category in enumerate(("Coding", "Non-coding")):
+        split_panel.columnconfigure(column, weight=1)
+        card = ttk.Frame(split_panel)
+        card.grid(row=0, column=column, sticky="ew", padx=6)
+        ttk.Label(card, text=f"{category} AI spend", style="Telekom.TLabel").pack()
+        ttk.Label(card, textvariable=split_vars[category], foreground="#e20074",
+                  font=("Arial", 12, "bold")).pack(pady=(3, 0))
+    ttk.Label(split_panel, textvariable=split_note_var, foreground="#c62828",
+              style="Telekom.TLabel").grid(row=1, column=0, columnspan=2, pady=(4, 0))
+
     content.bind(
         "<Triple-Button-1>",
         lambda event: open_budget_universe(root, preview_vars),
@@ -1917,8 +2034,20 @@ def main():
         nav_button.bind("<Leave>", lambda event, button=nav_button: tab_hover(event, button, False))
     select_section(0)
 
-    def update_preview(summary, unique_users, without_license):
+    def update_preview(summary, detail, unique_users, without_license):
         total_cost = sum(row["cost"] or 0 for row in summary)
+        split = ai_cost_split(detail)
+        for category in ("Coding", "Non-coding"):
+            values = split[category]
+            split_vars[category].set(
+                f"{values['share']:.1%}  ·  €{values['cost']:,.2f}"
+                if values["share"] is not None else "n.a."
+            )
+        unclassified = split["Unclassified"]["cost"]
+        split_note_var.set(
+            f"Unclassified AI spend: €{unclassified:,.2f} — set use in License Settings"
+            if unclassified else ""
+        )
         user_count = len(unique_users)
         preview_vars["users"].set(f"{user_count:,}")
         preview_vars["monthly"].set(f"€{total_cost:,.2f}")
@@ -2045,7 +2174,7 @@ def main():
             )
             if not detail:
                 raise ValueError("No matching AI services were found.")
-            update_preview(summary, unique_users, without_license)
+            update_preview(summary, detail, unique_users, without_license)
             default_name = f"AI_Cost_Calculator_{datetime.now():%Y%m%d_%H%M}.xlsx"
             selected_destination = filedialog.asksaveasfilename(
                 parent=root,
