@@ -245,6 +245,11 @@ def load_saved_hr():
     try:
         with path.open("r", encoding="utf-8") as file:
             records = json.load(file)
+        records = {
+            normalize_email(record.get("email", email)): record
+            for email, record in records.items()
+            if normalize_email(record.get("email", email))
+        }
         updated = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
         return records, updated
     except (OSError, json.JSONDecodeError):
@@ -260,6 +265,17 @@ def save_hr(records):
 
 def clean(value) -> str:
     return str(value).strip() if value is not None else ""
+
+
+def normalize_email(value) -> str:
+    text = clean(value).replace("\u00a0", " ")
+    text = re.sub(r"^mailto:\s*", "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", "", text).casefold()
+
+
+def display_position_title(value) -> str:
+    title = re.sub(r"\s+", " ", clean(value)).strip()
+    return re.sub(r"\s+(?:\d+|[IVXLCDMΙΧVΛΜ]+)$", "", title, flags=re.IGNORECASE).strip()
 
 
 def number(value):
@@ -325,22 +341,55 @@ def read_costcenter_report(source: Path):
 
 def read_hr_report(source: Path):
     workbook = load_workbook(source, data_only=True, read_only=True)
-    sheet = workbook.active
-    rows = list(sheet.iter_rows(values_only=True))
-    records = {}
-    for row in rows[2:]:
-        row = list(row) + [None] * 16
-        email = clean(row[5]).casefold()
-        if not email:
-            continue
-        records[email] = {
-            "email": clean(row[5]),
-            "position_title": clean(row[10]),
-            "supervisor_mail": clean(row[13]),
-            "department": clean(row[6]),
-            "unit": clean(row[7]),
-        }
-    return records
+    aliases = {
+        "email": {"email", "email address", "employee email", "user email", "mail"},
+        "position_title": {"position title", "job title", "job position", "position"},
+        "supervisor_mail": {"supervisor email", "supervisor mail", "manager email", "manager mail"},
+        "department": {"department", "organizational department"},
+        "unit": {"unit", "organizational unit"},
+        "first_name": {"first name", "given name"},
+        "last_name": {"last name", "surname", "family name"},
+    }
+
+    def header_key(value):
+        return re.sub(r"[^a-z0-9]+", " ", clean(value).casefold()).strip()
+
+    for sheet in workbook.worksheets:
+        rows = sheet.iter_rows(values_only=True)
+        for row in rows:
+            headers = {header_key(value): index for index, value in enumerate(row) if clean(value)}
+            if not headers.keys() & aliases["email"]:
+                continue
+            columns = {
+                field: next((headers[name] for name in names if name in headers), None)
+                for field, names in aliases.items()
+            }
+            if columns["position_title"] is None or columns["supervisor_mail"] is None:
+                continue
+
+            def value_for(values, field):
+                index = columns[field]
+                return clean(values[index]) if index is not None and index < len(values) else ""
+
+            records = {}
+            for values in rows:
+                email = normalize_email(value_for(values, "email"))
+                if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                    continue
+                records[email] = {
+                    "email": value_for(values, "email"),
+                    "position_title": display_position_title(value_for(values, "position_title")),
+                    "supervisor_mail": value_for(values, "supervisor_mail"),
+                    "department": value_for(values, "department"),
+                    "unit": value_for(values, "unit"),
+                    "name": " ".join(filter(None, (value_for(values, "first_name"), value_for(values, "last_name")))),
+                }
+            if records:
+                return records
+    raise ValueError(
+        "No HR users found. The report needs Email Address, Position Title "
+        "and Supervisor Email columns. Existing HR data was not changed."
+    )
 
 
 def calculate(services, members=None, include_non_ai=False, hr_records=None):
@@ -406,8 +455,8 @@ def calculate(services, members=None, include_non_ai=False, hr_records=None):
             record["email"] = member.get("email", "")
             record["costcenter"] = member.get("costcenter", "")
             record["manager"] = member.get("manager", "")
-            hr_record = hr_records.get(record["email"].casefold(), {})
-            record["position_title"] = hr_record.get("position_title", "")
+            hr_record = hr_records.get(normalize_email(record["email"]), {})
+            record["position_title"] = display_position_title(hr_record.get("position_title", ""))
             record["supervisor_mail"] = hr_record.get("supervisor_mail", "")
             record["licenses"] += 1
             record["products"].add(product)
@@ -452,10 +501,14 @@ def calculate(services, members=None, include_non_ai=False, hr_records=None):
             }
         )
     summary.sort(key=lambda x: x["product"])
-    without_license = [
-        member for key, member in members.items()
-        if key not in user_costs
-    ]
+    without_license = []
+    for key, member in members.items():
+        if key in user_costs:
+            continue
+        without_member = dict(member)
+        hr_record = hr_records.get(normalize_email(member.get("email", "")), {})
+        without_member["supervisor_mail"] = hr_record.get("supervisor_mail", "")
+        without_license.append(without_member)
     without_license.sort(key=lambda x: x.get("account", "").casefold())
     return (
         summary,
@@ -706,13 +759,13 @@ def export_report(destination: Path, source: Path, summary, detail, unique_users
 
     without_sheet = wb.create_sheet("Users Without Any License" if full_license_report else "Users Without AI License")
     without_sheet.append([
-        "Account", "Name", "Email", "Cost center", "Cost center manager",
+        "Account", "Name", "Email", "Cost center", "Cost center manager", "Supervisor mail",
     ])
     for member in without_license:
         without_sheet.append([
             member.get("account", ""), member.get("name", ""),
             member.get("email", ""), member.get("costcenter", ""),
-            member.get("manager", ""),
+            member.get("manager", ""), member.get("supervisor_mail", ""),
         ])
     style_sheet(without_sheet)
 
@@ -1069,7 +1122,8 @@ def resolve_manager_email(manager, members):
 
 def choose_position_title(root, hr_records):
     positions = sorted(
-        {record.get("position_title", "") for record in hr_records.values() if record.get("position_title")},
+        {display_position_title(record.get("position_title", "")) for record in hr_records.values()
+         if display_position_title(record.get("position_title", ""))},
         key=str.casefold,
     )
     if not positions:
@@ -1941,12 +1995,17 @@ def main():
         if not report_name:
             return False
         try:
-            current_hr = read_hr_report(Path(report_name))
-            hr_updated = save_hr(current_hr)
+            new_hr = read_hr_report(Path(report_name))
+            new_updated = save_hr(new_hr)
+            current_hr, hr_updated = new_hr, new_updated
             hr_status_var.set(f"HR data: {hr_updated}")
+            titles = sum(bool(record.get("position_title")) for record in current_hr.values())
+            supervisors = sum(bool(record.get("supervisor_mail")) for record in current_hr.values())
             messagebox.showinfo(
                 "HR data updated",
-                f"Saved {len(current_hr)} HR users.\n\n"
+                f"Saved {len(current_hr)} HR users.\n"
+                f"Position titles: {titles}/{len(current_hr)}.\n"
+                f"Supervisor emails: {supervisors}/{len(current_hr)}.\n\n"
                 "This report will be used automatically for future calculations.",
                 parent=root,
             )
@@ -2226,7 +2285,7 @@ def main():
         try:
             selected_accounts = {
                 key for key, member in current_members.items()
-                if current_hr.get(member.get("email", "").casefold(), {}).get("position_title") == position
+                if display_position_title(current_hr.get(normalize_email(member.get("email", "")), {}).get("position_title")) == position
             }
             selected_members = {key: current_members[key] for key in selected_accounts}
             services = read_report(source)
@@ -2290,7 +2349,7 @@ def main():
         try:
             selected_accounts = {
                 key for key, member in current_members.items()
-                if current_hr.get(member.get("email", "").casefold(), {}).get("supervisor_mail", "").casefold() == supervisor.casefold()
+                if normalize_email(current_hr.get(normalize_email(member.get("email", "")), {}).get("supervisor_mail", "")) == normalize_email(supervisor)
             }
             selected_members = {key: current_members[key] for key in selected_accounts}
             services = read_report(source)
