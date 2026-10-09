@@ -52,7 +52,8 @@ NON_AI_PRODUCT_PRICES = {
     "Global Secure Access for LMD": ("Global Secure Access for LMD", 5.10),
 }
 CODING_AI_LICENSES = {
-    "ChatGPT Enterprise Credit Package L", "Claude Code", "Cursor",
+    "ChatGPT Enterprise Credit Package L", "ChatGPT Enterprise Credit Package XXL",
+    "Claude Code", "Cursor",
     "Gemini Code Assist", "GitHub Copilot",
     "GitHub Copilot Upgrade Package 1 for advanced use",
     "GitHub Copilot Upgrade Package 2 for intensive use",
@@ -61,6 +62,7 @@ AI_LICENSE_USE = {
     name: ("Coding" if name in CODING_AI_LICENSES else "Non-coding")
     for name in PRODUCT_PRICES
 }
+AI_CLASSIFICATION_VERSION = 2
 DEFAULT_PRODUCT_PRICES = dict(PRODUCT_PRICES)
 LICENSE_ACTIVE = {name: True for name in PRODUCT_PRICES}
 NON_AI_LICENSE_ACTIVE = {name: True for name in NON_AI_PRODUCT_PRICES}
@@ -195,6 +197,8 @@ def load_license_settings():
             LICENSE_ACTIVE[name] = bool(values.get("active", True))
             category = values.get("use", AI_LICENSE_USE.get(name, "Unclassified"))
             AI_LICENSE_USE[name] = category if category in ("Coding", "Non-coding") else "Unclassified"
+        if settings.get("classification_version") != AI_CLASSIFICATION_VERSION:
+            AI_LICENSE_USE["ChatGPT Enterprise Credit Package XXL"] = "Coding"
         for name, values in sections.get("non_ai", {}).items():
             if not isinstance(values, dict):
                 continue
@@ -210,6 +214,7 @@ def load_license_settings():
 
 def save_license_settings():
     settings = {
+        "classification_version": AI_CLASSIFICATION_VERSION,
         "ai": {
             name: {"product": product, "price": price, "active": LICENSE_ACTIVE.get(name, True),
                    "use": AI_LICENSE_USE.get(name, "Unclassified")}
