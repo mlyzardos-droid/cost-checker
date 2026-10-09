@@ -34,6 +34,7 @@ except ImportError:
 # prices come from the supplied images.
 PRODUCT_PRICES = {
     "ChatGPT Enterprise Basic": ("ChatGPT Enterprise Basic", 0.00),
+    "ChatGPT Enterprise Credit Package S": ("ChatGPT Credit Package S", 5.00),
     "ChatGPT Enterprise Credit Package L": ("ChatGPT Credit Package L", 100.00),
     "ChatGPT Enterprise Credit Package M": ("ChatGPT Credit Package M", 30.00),
     "ChatGPT Enterprise Credit Package XXL": ("ChatGPT Credit Package XXL", 1000.00),
