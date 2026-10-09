@@ -2040,12 +2040,12 @@ def main():
         for category in ("Coding", "Non-coding"):
             values = split[category]
             split_vars[category].set(
-                f"{values['share']:.1%}  ·  €{values['cost']:,.2f}"
+                f"{values['share']:.1%}"
                 if values["share"] is not None else "n.a."
             )
-        unclassified = split["Unclassified"]["cost"]
+        unclassified = split["Unclassified"]["licenses"]
         split_note_var.set(
-            f"Unclassified AI spend: €{unclassified:,.2f} — set use in License Settings"
+            "Unclassified AI licences — set use in License Settings"
             if unclassified else ""
         )
         user_count = len(unique_users)
